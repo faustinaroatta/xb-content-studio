@@ -168,3 +168,22 @@ Return ONLY a JSON list of objects with
 "date" (YYYY-MM-DD), "time" (HH:MM), "account" (one of {list(per_account)}), "format" (exactly one of {FORMATS}),
 "pillar" (exactly one of {PILLARS}), "title" (short), "copy" (full caption ready for review)."""
     return _json(_ask(p, 8000))
+
+
+def adapt_inspo(title, summary, source, studio, accounts, language):
+    """Turns a news item about another studio into a concrete XB post idea (no copying)."""
+    acc_txt = ", ".join(f"{k} ({ACCOUNTS[k]['label']})" for k in accounts)
+    p = f"""A reference studio just published this ({source}):
+Title: {title}
+Studio: {studio or 'unknown'}
+Summary: {summary}
+
+Propose ONE concrete post idea for XB Architecture inspired by the APPROACH or topic of this news
+(format, angle, storytelling, innovation) — never copy it or claim their work. Connect it to XB's real
+projects (North Miami, Royal Palm, Sea Island, Coral Ridge, Surfside, Plantation Acres) when it makes sense.
+Possible accounts: {acc_txt}.
+Write everything in {language if not language.startswith('Bilingual') else 'English'}.
+Return ONLY JSON: {{"title": "...", "why": "what to borrow from the reference, 1 sentence",
+"description": "how to execute it, 2-4 sentences", "caption": "a ready-to-edit caption draft",
+"pillar": one of {PILLARS}, "format": one of {FORMATS}, "account": one of {list(accounts)}}}"""
+    return _json(_ask(p, 2500))

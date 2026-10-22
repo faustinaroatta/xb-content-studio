@@ -5,6 +5,7 @@ Run with:  streamlit run app.py
 """
 import datetime as dt
 import hmac
+import html
 import io
 
 import altair as alt
@@ -14,6 +15,7 @@ import streamlit as st
 import ai
 import db
 import ig_oauth
+import inspo
 import integrations
 from config import (ACCOUNTS, BRAND, DEFAULT_VOICES, FORMATS, IDEA_STATUSES, INSPO,
                     LANGUAGES, LOGO_SVG, PILLARS, STATUSES, get_secret)
@@ -474,7 +476,7 @@ def page_ideas():
            t("Shared team idea bank + AI generator inspired by reference studios.",
              "Banco compartido del equipo + generador con IA inspirado en estudios de referencia."))
     t1, t2, t3 = st.tabs([t("Team bank", "Banco del equipo"), t("✨ Generate with AI", "✨ Generar con IA"),
-                          t("Inspo · reference accounts", "Inspo · cuentas de referencia")])
+                          t("🔄 What's new · live inspo", "🔄 Lo nuevo · inspo en vivo")])
 
     with t1:
         with st.expander(t("＋ Add an idea", "＋ Sumar una idea"), expanded=False):
@@ -567,13 +569,110 @@ def page_ideas():
                     st.rerun()
 
     with t3:
-        st.caption(t("Style references. The AI borrows each one's approach, never their content.",
-                     "Referencias de estilo. La IA toma el enfoque de cada una, nunca copia su contenido."))
-        cols = st.columns(3)
-        for k, i in enumerate(INSPO):
-            with cols[k % 3]:
-                st.markdown(f"<div class='xb-idea'><h4>{i['name']}</h4><div class='xb-muted'>{t(i['en'], i['es'])}</div></div>",
-                            unsafe_allow_html=True)
+        _inspo_feed(user)
+        with st.expander(t("Style references the AI uses", "Referencias de estilo que usa la IA")):
+            cols = st.columns(3)
+            for k, i in enumerate(INSPO):
+                with cols[k % 3]:
+                    st.markdown(f"<div class='xb-idea'><h4>{i['name']}</h4><div class='xb-muted'>{t(i['en'], i['es'])}</div></div>",
+                                unsafe_allow_html=True)
+
+
+
+@st.cache_data(ttl=3 * 3600, show_spinner=False)
+def _load_inspo():
+    items, errors = inspo.fetch_all()
+    return items, errors, dt.datetime.now().strftime("%H:%M")
+
+
+def _ago(d):
+    if not d:
+        return ""
+    hours = max(0, int((dt.datetime.now(dt.timezone.utc).replace(tzinfo=None) - d).total_seconds() // 3600))
+    if hours < 24:
+        return t(f"{hours}h ago", f"hace {hours} h")
+    return t(f"{hours // 24}d ago", f"hace {hours // 24} d")
+
+
+def _inspo_feed(user):
+    st.caption(t("What architecture studios around the world are publishing right now, from ArchDaily and Dezeen. "
+                 "Updates on its own every few hours. Use ✨ to turn any of it into an XB post.",
+                 "Lo que están publicando ahora los estudios de arquitectura del mundo, desde ArchDaily y Dezeen. "
+                 "Se actualiza solo cada pocas horas. Usá ✨ para convertir cualquiera en un posteo de XB."))
+    with st.spinner(t("Loading what's new…", "Cargando lo nuevo…")):
+        items, errors, loaded_at = _load_inspo()
+    c1, c2, c3, c4 = st.columns([2.2, 1.4, 1.2, 0.9])
+    q = c1.text_input(t("Search", "Buscar"), placeholder=t("e.g. timber, coastal, villa, Zaha…",
+                                                           "ej.: madera, costero, villa, Zaha…"), key="if_q")
+    sources = sorted({i["source"] for i in items})
+    src = c2.multiselect(t("Source", "Fuente"), sources, default=sources, key="if_src")
+    days = c3.selectbox(t("From", "Desde"), [3, 7, 14, 30], index=1, key="if_days",
+                        format_func=lambda d: t(f"last {d} days", f"últimos {d} días"))
+    with c4:
+        st.write("")
+        if st.button("↻", help=t("Refresh now", "Actualizar ahora"), key="if_ref", width="stretch"):
+            _load_inspo.clear()
+            st.rerun()
+    cutoff = dt.datetime.now(dt.timezone.utc).replace(tzinfo=None) - dt.timedelta(days=days)
+    shown = [i for i in items if i["source"] in src and (i["published"] is None or i["published"] >= cutoff)]
+    if q:
+        ql = q.lower()
+        shown = [i for i in shown if ql in (i["title"] + " " + i["summary"] + " " + i["studio"]).lower()]
+    st.caption(t(f"{len(shown)} posts · updated {loaded_at}", f"{len(shown)} publicaciones · actualizado {loaded_at}"))
+    if errors and not items:
+        st.warning(t("Couldn't load the feeds right now. Try ↻ in a few minutes.",
+                     "No se pudieron cargar las fuentes ahora. Probá ↻ en unos minutos."))
+    if not shown and items:
+        st.info(t("Nothing matches. Try another search or a longer period.",
+                  "No hay resultados. Probá otra búsqueda o un período más largo."))
+    limit = st.session_state.get("if_limit", 24)
+    cols = st.columns(2, gap="medium")
+    for k, i in enumerate(shown[:limit]):
+        with cols[k % 2]:
+            studio = f" · <b>{html.escape(i['studio'])}</b>" if i["studio"] else ""
+            st.markdown(
+                f"<div class='xb-idea'><div class='xb-muted'><span class='xb-chip'>{html.escape(i['source'])}</span>"
+                f"{studio} · {_ago(i['published'])}</div>"
+                f"<h4 style='margin-top:8px'>{html.escape(i['title'])}</h4>"
+                f"<p style='margin:6px 0 2px 0;font-size:.9rem'>{html.escape(i['summary'])}</p></div>",
+                unsafe_allow_html=True)
+            b1, b2, b3 = st.columns([1, 1.3, 1.1])
+            b1.link_button(t("Open", "Abrir"), i["link"], width="stretch")
+            key = f"ad_{abs(hash(i['link']))}"
+            if b2.button(t("✨ Adapt for XB", "✨ Adaptar para XB"), key=key, width="stretch"):
+                with st.spinner(t("Thinking…", "Pensando…")):
+                    try:
+                        st.session_state[key + "_r"] = ai.adapt_inspo(
+                            i["title"], i["summary"], i["source"], i["studio"], ACC_KEYS,
+                            "Spanish" if is_es() else "English")
+                    except Exception as e:  # noqa: BLE001
+                        st.error(str(e))
+            if b3.button(t("💾 Save", "💾 Guardar"), key=key + "_s", width="stretch"):
+                db.insert_row(db.ideas, dict(title=i["title"][:240], description=i["summary"], pillar="Trends & Inspiration",
+                                             format="Carousel", account="ig_xb", inspo=i["link"][:240], source="Team",
+                                             votes=0, voters="", status="New", created_by=user, created_at=db.now()))
+                st.toast(t("Saved to the idea bank", "Guardada en el banco de ideas"))
+            res = st.session_state.get(key + "_r")
+            if res:
+                with st.container(border=True):
+                    st.markdown(f"**✨ {res.get('title', '')}**")
+                    st.caption(f"{t('Borrow', 'Tomar')}: {res.get('why', '')}")
+                    st.write(res.get("description", ""))
+                    st.text_area(t("Caption draft", "Borrador de copy"), value=res.get("caption", ""),
+                                 key=key + "_c", height=150)
+                    if st.button(t("💡 Save as XB idea", "💡 Guardar como idea de XB"), key=key + "_i"):
+                        db.insert_row(db.ideas, dict(
+                            title=res.get("title", "")[:240], description=res.get("description", ""),
+                            pillar=res.get("pillar") if res.get("pillar") in PILLARS else "Trends & Inspiration",
+                            format=res.get("format") if res.get("format") in FORMATS else "Carousel",
+                            account=res.get("account") if res.get("account") in ACC_KEYS else "ig_xb",
+                            inspo=i["link"][:240], source="AI", votes=0, voters="", status="New",
+                            created_by=user, created_at=db.now()))
+                        st.toast(t("Saved to the idea bank", "Guardada en el banco de ideas"))
+    if len(shown) > limit:
+        if st.button(t("Show more", "Ver más"), key="if_more"):
+            st.session_state["if_limit"] = limit + 24
+            st.rerun()
 
 
 def _save_ai_idea(g, user):
