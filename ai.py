@@ -39,7 +39,8 @@ def _missing_key():
 SYSTEM = f"""You are the social media strategist and copywriter for XB Architecture.
 {BRAND_CONTEXT}
 Rules: never invent concrete facts (square footage, prices, client names, awards) — if needed, leave a
-placeholder in brackets like [project sq ft]. No empty clichés ("dream home", "stunning").
+placeholder in brackets like [project sq ft]. PRIVACY: never write a street address, house number or client name in
+any content — refer to projects only by neighborhood/city and type (e.g. "a waterfront residence in Fort Lauderdale"). No empty clichés ("dream home", "stunning").
 Write like a premium architecture studio: precise, sensory, confident.
 Always write the content in the language requested in each message."""
 
@@ -53,7 +54,7 @@ def _system():
     return SYSTEM + ("\n\n" + ctx if ctx else "")
 
 
-def _ask_gemini(prompt, max_tokens, image=None):
+def _ask_gemini(prompt, max_tokens, image=None, json_mode=False):
     import base64
     key = get_secret("GEMINI_API_KEY")
     parts = [{"text": prompt}]
@@ -61,7 +62,8 @@ def _ask_gemini(prompt, max_tokens, image=None):
         parts.append({"inline_data": {"mime_type": image[1], "data": base64.b64encode(image[0]).decode()}})
     body = {"system_instruction": {"parts": [{"text": _system()}]},
             "contents": [{"role": "user", "parts": parts}],
-            "generationConfig": {"maxOutputTokens": max(max_tokens, 4096)}}
+            "generationConfig": {"maxOutputTokens": max(max_tokens, 4096),
+                                 **({"responseMimeType": "application/json"} if json_mode else {})}}
     last = ""
     for model in GEMINI_MODELS:   # if one model is busy or retired, try the next free one
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
@@ -103,20 +105,56 @@ def _ask_claude(prompt, max_tokens, image=None):
     return "".join(b.text for b in msg.content if b.type == "text").strip()
 
 
-def _ask(prompt, max_tokens=2500, image=None):
+def _ask(prompt, max_tokens=2500, image=None, json_mode=False):
     p = provider()
     if p == "gemini":
-        return _ask_gemini(prompt, max_tokens, image)
+        return _ask_gemini(prompt, max_tokens, image, json_mode)
     if p == "anthropic":
         return _ask_claude(prompt, max_tokens, image)
     raise _missing_key()
 
 
 def _json(text):
-    m = re.search(r"(\[.*\]|\{.*\})", text, re.S)
-    if not m:
-        raise ValueError("The AI did not return JSON, please try again. / La IA no devolvió JSON, probá de nuevo.")
-    return json.loads(m.group(1))
+    """Robust JSON reader: handles code fences, extra text, several arrays/objects in a row."""
+    text = re.sub(r"```(?:json)?", "", text or "").strip()
+    try:
+        return json.loads(text)
+    except ValueError:
+        pass
+    dec, i, found = json.JSONDecoder(), 0, []
+    while i < len(text):
+        m = re.search(r"[\[{]", text[i:])
+        if not m:
+            break
+        start = i + m.start()
+        try:
+            obj, end = dec.raw_decode(text, start)
+            found.append(obj)
+            i = end
+        except ValueError:
+            i = start + 1
+    if not found:
+        raise ValueError("The AI did not return valid data, please try again. / La IA no devolvió datos válidos, probá de nuevo.")
+    if len(found) == 1:
+        return found[0]
+    items = []
+    for f in found:
+        items.extend(f if isinstance(f, list) else [f])
+    if all(isinstance(x, dict) for x in items) and isinstance(found[0], dict) and len(items) == 1:
+        return items[0]
+    return items
+
+
+def _as_list(data):
+    """Accepts [..], {"projects": [..]}, {"ideas": [..]} or a single object."""
+    if isinstance(data, list):
+        return [x for x in data if isinstance(x, dict)]
+    if isinstance(data, dict):
+        for v in data.values():
+            if isinstance(v, list) and all(isinstance(x, dict) for x in v):
+                return v
+        return [data]
+    return []
 
 
 def _acc_block(account):
@@ -161,7 +199,7 @@ Accounts:
 Return ONLY a JSON with this shape:
 {{"ig_xb": {{"format": "...", "copy": "..."}}, "li_xb": {{...}}, "li_john": {{...}}, "li_ximena": {{...}}}}
 format must be one of: {FORMATS}"""
-    return _json(_ask(p, 4000))
+    return _json(_ask(p, 4000, json_mode=True))
 
 
 def generate_ideas(n, pillars, inspo_names, accounts, language, extra=""):
@@ -180,7 +218,7 @@ Return ONLY a JSON list of objects with keys
 "title" (short hook), "description" (how to execute it: shots, slides, script in 2-4 sentences),
 "pillar" (exactly one of {PILLARS}), "format" (exactly one of {FORMATS}), "account" (one of {list(accounts)}),
 "inspo" (which reference account inspires it and why, one sentence)."""
-    return _json(_ask(p, 4000))
+    return _as_list(_json(_ask(p, 4000, json_mode=True)))
 
 
 def plan_weeks(start, days, per_account, language, notes, taken_titles):
@@ -197,7 +235,7 @@ Captions: {_lang_rule(language)} Titles in English.
 Return ONLY a JSON list of objects with
 "date" (YYYY-MM-DD), "time" (HH:MM), "account" (one of {list(per_account)}), "format" (exactly one of {FORMATS}),
 "pillar" (exactly one of {PILLARS}), "title" (short), "copy" (full caption ready for review)."""
-    return _json(_ask(p, 8000))
+    return _as_list(_json(_ask(p, 8000, json_mode=True)))
 
 
 def adapt_inspo(title, summary, source, studio, accounts, language):
@@ -216,7 +254,7 @@ Write everything in {language if not language.startswith('Bilingual') else 'Engl
 Return ONLY JSON: {{"title": "...", "why": "what to borrow from the reference, 1 sentence",
 "description": "how to execute it, 2-4 sentences", "caption": "a ready-to-edit caption draft",
 "pillar": one of {PILLARS}, "format": one of {FORMATS}, "account": one of {list(accounts)}}}"""
-    return _json(_ask(p, 2500))
+    return _json(_ask(p, 2500, json_mode=True))
 
 
 
@@ -224,14 +262,19 @@ def extract_projects(text="", image=None):
     """Reads a Monograph export (table text, pasted text or screenshot) and returns a clean project list."""
     p = f"""This is an export / copy / screenshot of XB Architecture's project list from their project
 management software (Monograph). Extract every PROJECT (ignore totals, invoices, hours, fees, money and people).
-For each project return: "name" (short project name as written), "location" (city/neighborhood if present, else ""),
-"phase" (one of: Design, Permits, Under construction, Finished, On hold, Other — infer from status/phase columns),
+Monograph names look like "2417_2717 NE 26th Ter_Ex..." (job number _ street address _ client/description).
+For each project return: "name" (job number + short street/description as written, e.g. "2417 · NE 26th Ter"; drop
+client surnames), "location" (neighborhood/city if you can infer it — e.g. NE/SE streets with no city → "Fort Lauderdale area",
+"Pompano" → "Pompano Beach" — else ""),
+"phase" (one of: Design, Permits, Under construction, Finished, On hold, Other — infer from status/phase columns or
+phase labels: CA/Construction Administration → Under construction; SD/DD/CD/Schematic/Design Development/Construction
+Documents → Design; Permit/Permitting/Bidding → Permits; Closed/Archived/Complete → Finished),
 "type" (e.g. single-family residence, renovation, multifamily — if present, else ""), "notes" (max 1 short line or "").
 Never include fees, budgets, client names or personal data.
 Return ONLY a JSON list.
 DATA:
 {text[:28000]}"""
-    return _json(_ask(p, 6000, image))
+    return _as_list(_json(_ask(p, 6000, image, json_mode=True)))
 
 
 def project_ideas(project, accounts, language, n=4):
@@ -245,4 +288,4 @@ details, client experience, awards-style storytelling.
 Possible accounts: {acc_txt}. Write in {language if not language.startswith('Bilingual') else 'English'}.
 Return ONLY a JSON list of objects with "title", "description" (2-3 sentences on how to execute it),
 "pillar" (one of {PILLARS}), "format" (one of {FORMATS}), "account" (one of {list(accounts)}), "inspo" ("")."""
-    return _json(_ask(p, 3000))
+    return _as_list(_json(_ask(p, 3000, json_mode=True)))
