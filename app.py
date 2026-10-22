@@ -15,6 +15,7 @@ import streamlit as st
 import ai
 import db
 import ig_oauth
+import ig_discovery
 import wall
 import integrations
 from config import (ACCOUNTS, BRAND, DEFAULT_VOICES, FORMATS, IDEA_STATUSES, INSPO,
@@ -489,7 +490,7 @@ def page_ideas():
            t("Shared team idea bank + AI generator inspired by reference studios.",
              "Banco compartido del equipo + generador con IA inspirado en estudios de referencia."))
     t1, t2, t3 = st.tabs([t("Team bank", "Banco del equipo"), t("✨ Generate with AI", "✨ Generar con IA"),
-                          t("📌 Real posts wall", "📌 Muro de posteos reales")])
+                          t("📸 Live Instagram", "📸 Instagram en vivo")])
 
     with t1:
         with st.expander(t("＋ Add an idea", "＋ Sumar una idea"), expanded=False):
@@ -592,6 +593,109 @@ def page_ideas():
 
 
 
+@st.cache_data(ttl=3 * 3600, show_spinner=False)
+def _load_ig_live(extra):
+    posts, found, errors = ig_discovery.fetch_all(extra)
+    return posts, found, errors, dt.datetime.now().strftime("%H:%M")
+
+
+def _fmt_k(n):
+    try:
+        n = int(n)
+    except (TypeError, ValueError):
+        return "—"
+    return f"{n / 1_000_000:.1f}M" if n >= 1_000_000 else f"{n / 1000:.0f}K" if n >= 1000 else str(n)
+
+
+def _ig_live(user):
+    if not ig_discovery.ready():
+        st.markdown(
+            f"<div class='xb-idea' style='padding:28px'><h4>{t('Live feed of real Instagram posts', 'Feed en vivo de posteos reales de Instagram')}</h4>"
+            f"<p>{t('The latest real posts (photo or video, full caption, likes and comments) from BIG, Zaha Hadid, SOM, Gensler, '
+                    'Luciano Kruk, Andrés Remy, MAPA, Martín Gómez, Arquitectonica, Oppenheim, Choeff Levy Fischman and more — '
+                    'appearing on their own and refreshing every few hours.',
+                    'Los últimos posteos reales (foto o video, texto completo, likes y comentarios) de BIG, Zaha Hadid, SOM, Gensler, '
+                    'Luciano Kruk, Andrés Remy, MAPA, Martín Gómez, Arquitectonica, Oppenheim, Choeff Levy Fischman y más — '
+                    'apareciendo solos y renovándose cada pocas horas.')}</p>"
+            f"<p class='xb-muted'>{t('⏳ Turns on when Meta is connected (FB_ACCESS_TOKEN and FB_IG_USER_ID in Secrets). '
+                                      'LinkedIn does not allow any app to read other companies’ posts automatically.',
+                                      '⏳ Se activa cuando conectemos Meta (FB_ACCESS_TOKEN y FB_IG_USER_ID en Secrets). '
+                                      'LinkedIn no permite a ninguna app leer automáticamente los posteos de otras empresas.')}</p></div>",
+            unsafe_allow_html=True)
+        return
+    extra = tuple(a.get("ig", "").strip() for a in wall.accounts() if a.get("ig"))
+    with st.spinner(t("Loading the latest posts…", "Cargando los últimos posteos…")):
+        posts, found, errors, loaded_at = _load_ig_live(extra)
+    c1, c2, c3, c4 = st.columns([2.2, 1.6, 1, 0.8])
+    q = c1.text_input(t("Search in captions", "Buscar en los textos"), key="ig_q")
+    names = sorted({p["account"] for p in posts})
+    pick = c2.multiselect(t("Accounts", "Cuentas"), names, key="ig_pick")
+    mix = c3.toggle(t("🔀 Mix", "🔀 Mezclar"), key="ig_mix")
+    with c4:
+        st.write("")
+        if st.button("↻", key="ig_ref", help=t("Refresh now", "Actualizar ahora"), width="stretch"):
+            _load_ig_live.clear()
+            st.rerun()
+    shown = [p for p in posts if (not pick or p["account"] in pick) and (not q or q.lower() in p["caption"].lower())]
+    if mix:
+        import random
+        rnd = random.Random(dt.date.today().toordinal())
+        shown = shown[:]
+        rnd.shuffle(shown)
+    st.caption(t(f"{len(shown)} posts from {len(found)} accounts · updated {loaded_at}",
+                 f"{len(shown)} posteos de {len(found)} cuentas · actualizado {loaded_at}"))
+    if not posts:
+        st.warning(t("No posts came back. Check the Meta token in Secrets.", "No llegaron posteos. Revisá el token de Meta en Secrets."))
+    limit = st.session_state.get("ig_limit", 18)
+    cols = st.columns(3, gap="medium")
+    for k, p in enumerate(shown[:limit]):
+        with cols[k % 3]:
+            pic = (f"<img src='{html.escape(p['pic'])}' style='width:34px;height:34px;border-radius:50%;object-fit:cover' "
+                   f"referrerpolicy='no-referrer'>" if p.get("pic") else f"<div class='av'>{html.escape(p['account'][:2].upper())}</div>")
+            media = (f"<img class='img' src='{html.escape(p['image'])}' loading='lazy' referrerpolicy='no-referrer'>"
+                     if p["image"] else "")
+            badge = " ▶" if p["type"] == "VIDEO" else " ⧉" if p["type"] == "CAROUSEL_ALBUM" else ""
+            when = (p["timestamp"] or "")[:10]
+            st.markdown(
+                f"<div class='xb-post'><div class='hd'>{pic}<div><div class='who'>{html.escape(p['account'])}{badge}</div>"
+                f"<div class='meta'>@{html.escape(p['username'] or '')} · {_fmt_k(p['followers'])} {t('followers', 'seguidores')} "
+                f"· {p['where']}</div></div></div>{media}"
+                f"<div class='bd'><div class='meta' style='margin-bottom:6px'>❤ {_fmt_k(p['likes'])} · 💬 {_fmt_k(p['comments'])} · {when}</div>"
+                f"<div class='cap'>{html.escape(p['caption'])}</div></div></div>",
+                unsafe_allow_html=True)
+            b1, b2, b3 = st.columns([1, 1.25, 1])
+            b1.link_button("↗", p["link"], width="stretch", help=t("Open on Instagram", "Abrir en Instagram"))
+            key = f"igl_{k}_{abs(hash(p['link']))}"
+            if b2.button(t("✨ Adapt", "✨ Adaptar"), key=key, width="stretch"):
+                with st.spinner(t("Thinking…", "Pensando…")):
+                    try:
+                        st.session_state[key + "_r"] = ai.adapt_inspo(
+                            f"Instagram post by {p['account']} (@{p['username']})", p["caption"][:1500], "Instagram",
+                            p["account"], ACC_KEYS, "Spanish" if is_es() else "English")
+                    except Exception as e:  # noqa: BLE001
+                        st.error(str(e))
+            if b3.button("💾", key=key + "_s", width="stretch", help=t("Save to the idea bank", "Guardar en el banco de ideas")):
+                db.insert_row(db.ideas, dict(title=f"@{p['username']}: {p['caption'][:120]}", description=p["caption"][:1500],
+                                             pillar="Trends & Inspiration", format="Carousel", account="ig_xb",
+                                             inspo=(p["link"] or "")[:240], source="Team", votes=0, voters="",
+                                             status="New", created_by=user, created_at=db.now()))
+                st.toast(t("Saved to the idea bank", "Guardada en el banco de ideas"))
+            res = st.session_state.get(key + "_r")
+            if res:
+                with st.container(border=True):
+                    st.markdown(f"**✨ {res.get('title', '')}**")
+                    st.caption(f"{t('Borrow', 'Tomar')}: {res.get('why', '')}")
+                    st.write(res.get("description", ""))
+                    st.text_area(t("Caption draft", "Borrador de copy"), value=res.get("caption", ""), key=key + "_c", height=140)
+    if len(shown) > limit and st.button(t("Show more", "Ver más"), key="ig_more"):
+        st.session_state["ig_limit"] = limit + 18
+        st.rerun()
+    if errors:
+        with st.expander(t(f"{len(errors)} accounts not found (fix their handle in 👀 Accounts)",
+                           f"{len(errors)} cuentas no encontradas (corregí el usuario en 👀 Cuentas)")):
+            st.caption("\n".join(errors))
+
+
 def _embed(src, height):
     if hasattr(st, "iframe"):
         st.iframe(src, height=height)
@@ -601,11 +705,10 @@ def _embed(src, height):
 
 
 def _wall(user):
-    st.caption(t("Real Instagram and LinkedIn posts from studios and competitors, shown exactly as they were published. "
-                 "Paste a link → the original post appears here. Soon: Instagram fills in automatically once Meta is connected.",
-                 "Posteos reales de Instagram y LinkedIn de estudios y competidores, tal cual se publicaron. "
-                 "Pegás el link → aparece el post original. Pronto: Instagram se llena solo cuando conectemos Meta."))
-    w1, w2 = st.tabs([t("📌 Wall", "📌 Muro"), t("👀 Accounts to follow", "👀 Cuentas a seguir")])
+    w0, w1, w2 = st.tabs([t("📸 Live feed", "📸 Feed en vivo"), t("📌 Saved", "📌 Guardados"),
+                          t("👀 Accounts", "👀 Cuentas")])
+    with w0:
+        _ig_live(user)
 
     with w1:
         with st.expander(t("➕ Add posts", "➕ Sumar posteos"), expanded=False):
