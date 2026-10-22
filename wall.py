@@ -68,6 +68,23 @@ def save_accounts(items):
     db.set_meta("wall_accounts", json.dumps(items, ensure_ascii=False))
 
 
+def clean_handle(h):
+    h = (h or "").strip()
+    m = re.search(r"instagram\.com/([\w.]+)", h)
+    if m:
+        h = m.group(1)
+    return h.lstrip("@").strip("/").lower()
+
+
+def ig_profile_embed(handle):
+    return f"https://www.instagram.com/{clean_handle(handle)}/embed/"
+
+
+def li_posts_url(value):
+    url = li_url(value).rstrip("/")
+    return url if url.endswith("/posts") else url + "/posts/"
+
+
 def search_url(name, platform):
     site = "instagram.com" if platform == "ig" else "linkedin.com/company"
     return "https://www.google.com/search?q=" + quote_plus(f"site:{site} {name}")
