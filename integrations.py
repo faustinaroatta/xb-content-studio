@@ -22,15 +22,22 @@ CREDS = {
 }
 
 
+def _ig_stored():
+    import ig_oauth
+    return ig_oauth.stored_token()
+
+
 def is_configured(account):
+    if account == "ig_xb" and _ig_stored():
+        return True
     a, b = CREDS[account]
     return bool(get_secret(a)) and bool(get_secret(b))
 
 
 # ---------------- Instagram ----------------
-def _ig_insights(media_id, token):
+def _ig_insights(media_id, token, host=IG_HOST):
     for metrics in ("views,reach,saved,shares", "reach,saved,shares", "reach"):
-        r = requests.get(f"{IG_HOST}/{media_id}/insights",
+        r = requests.get(f"{host}/{media_id}/insights",
                          params={"metric": metrics, "access_token": token}, timeout=30)
         if r.ok:
             out = {}
@@ -45,14 +52,20 @@ def _ig_insights(media_id, token):
 
 
 def sync_instagram():
-    uid, tok = get_secret("IG_USER_ID"), get_secret("IG_ACCESS_TOKEN")
-    r = requests.get(f"{IG_HOST}/{uid}/media", params={
+    stored = _ig_stored()
+    if stored:   # connected with the "Connect Instagram" button
+        import ig_oauth
+        ig_oauth.maybe_refresh()
+        uid, tok, host = "me", ig_oauth.stored_token(), "https://graph.instagram.com/v23.0"
+    else:        # token pasted manually in secrets
+        uid, tok, host = get_secret("IG_USER_ID"), get_secret("IG_ACCESS_TOKEN"), IG_HOST
+    r = requests.get(f"{host}/{uid}/media", params={
         "fields": "id,caption,media_type,permalink,timestamp,like_count,comments_count",
         "limit": 50, "access_token": tok}, timeout=30)
     r.raise_for_status()
     n = 0
     for m in r.json().get("data", []):
-        ins = _ig_insights(m["id"], tok)
+        ins = _ig_insights(m["id"], tok, host)
         db.upsert_metric({
             "account": "ig_xb", "external_id": m["id"], "permalink": m.get("permalink"),
             "caption": (m.get("caption") or "")[:2000], "published_at": (m.get("timestamp") or "")[:19],

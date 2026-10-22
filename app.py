@@ -13,6 +13,7 @@ import streamlit as st
 
 import ai
 import db
+import ig_oauth
 import integrations
 from config import (ACCOUNTS, BRAND, DEFAULT_VOICES, FORMATS, IDEA_STATUSES, INSPO,
                     LANGUAGES, LOGO_SVG, PILLARS, STATUSES, get_secret)
@@ -131,7 +132,7 @@ def login():
         return st.session_state["user"]
     users = {}
     try:
-        users = dict(st.secrets.get("users", {}))
+        users = {str(k).strip().lower(): v for k, v in dict(st.secrets.get("users", {})).items()}
     except Exception:
         pass
     _, mid, _ = st.columns([1, 1.1, 1])
@@ -154,8 +155,8 @@ def login():
                 if not users and u.strip():
                     _start_session(u.strip())
                     st.rerun()
-                elif u in users and hmac.compare_digest(str(users[u]), p):
-                    _start_session(u)
+                elif u.strip().lower() in users and hmac.compare_digest(str(users[u.strip().lower()]), p.strip()):
+                    _start_session(u.strip().lower().capitalize())
                     st.rerun()
                 else:
                     st.error(t("Wrong username or password.", "Usuario o contraseña incorrectos."))
@@ -814,6 +815,100 @@ def page_reports():
             st.success(t(f"{len(c)} rows imported.", f"{len(c)} filas importadas."))
 
 
+def _instagram_connect(col):
+    """'Connect Instagram' button (OAuth) for the XB account."""
+    if ig_oauth.stored_token():
+        user = db.get_meta("ig_username") or "instagram"
+        exp = (db.get_meta("ig_token_expires") or "")[:10]
+        col.caption(t(f"Connected as @{user} · renews automatically (current until {exp})",
+                      f"Conectada como @{user} · se renueva sola (vigente hasta {exp})"))
+        if col.button(t("Disconnect", "Desconectar"), key="ig_disconnect"):
+            ig_oauth.disconnect()
+            st.rerun()
+    elif ig_oauth.oauth_ready():
+        col.link_button(t("🔗 Connect Instagram", "🔗 Conectar Instagram"), ig_oauth.auth_link())
+        col.caption(t("Log in with @xb.architecture. A new tab opens; come back here when it says Connected.",
+                      "Entrá con @xb.architecture. Se abre otra pestaña; volvé acá cuando diga Conectada."))
+    else:
+        col.caption(t("To enable the Connect button, add IG_APP_ID and IG_APP_SECRET to secrets (see README).",
+                      "Para activar el botón Conectar, agregá IG_APP_ID e IG_APP_SECRET en los secrets (ver README)."))
+
+
+PRIVACY_MD = """
+# Privacy Policy — XB Content Studio
+
+*Last updated: October 21, 2026*
+
+XB Content Studio is an internal tool operated by **XB Architecture PLLC**
+(2300 E Oakland Park Blvd, Suite 208, Fort Lauderdale, FL, USA) to plan, write and measure
+the social media content of XB Architecture. It is used only by XB Architecture team members.
+
+## Information we collect
+- **Team accounts:** the username of each team member who signs in to the tool.
+- **Content we create:** planned posts, captions, ideas and internal notes written by our team.
+- **Social media metrics of our own accounts:** for the XB Architecture LinkedIn Page and the
+  @xb.architecture Instagram account we read aggregated post metrics (likes/reactions, comments,
+  views/impressions, reach, shares, saves), post text, publication date and post link.
+  We do not collect information about individual members who engage with our posts.
+
+## How we use it
+Only to schedule and coordinate our posts and to produce internal performance reports.
+We do not sell, rent or share this information with third parties, and we do not use it for advertising.
+
+## Service providers
+Data is stored in a private database (Supabase) and the tool is hosted on Streamlit Community Cloud.
+Caption drafts are generated with Google Gemini from briefs written by our team; no LinkedIn or
+Instagram member data is sent to the AI.
+
+## Access tokens and retention
+Access tokens are stored encrypted in our hosting provider's secret storage or private database,
+and can be revoked at any time from LinkedIn or Instagram settings. Metrics are kept while they are
+useful for reporting and deleted on request or when an account is disconnected.
+
+## Contact
+Questions or deletion requests: faustina@xb-architecture.com
+"""
+
+
+def privacy_page():
+    """Public page (no login): https://<app>/?privacy"""
+    if "privacy" not in st.query_params:
+        return
+    _, mid, _ = st.columns([1, 2.2, 1])
+    with mid:
+        st.markdown(f"<div style='margin-top:4vh'>{LOGO_SVG.format(w=120)}</div>", unsafe_allow_html=True)
+        st.markdown(PRIVACY_MD)
+    st.stop()
+
+
+def handle_instagram_return():
+    """Runs before login: Instagram sends the user back here with ?code=…"""
+    qp = st.query_params
+    if "code" not in qp and "error" not in qp:
+        return
+    code, state, err = qp.get("code"), qp.get("state"), qp.get("error")
+    st.query_params.clear()
+    _, mid, _ = st.columns([1, 1.4, 1])
+    with mid:
+        st.markdown(f"<div style='text-align:center;margin-top:8vh'>{LOGO_SVG.format(w=150)}</div>",
+                    unsafe_allow_html=True)
+        if err:
+            st.warning("Instagram: connection cancelled. / Conexión cancelada.")
+        else:
+            with st.spinner("Connecting Instagram… / Conectando Instagram…"):
+                try:
+                    ok, msg = ig_oauth.handle_callback(code, state)
+                except Exception as e:  # noqa: BLE001
+                    ok, msg = False, str(e)[:200]
+            if ok:
+                db.set_meta("last_sync", "")   # sync right away on next visit
+                st.success(f"✅ Instagram connected: {msg}  ·  Instagram conectado: {msg}")
+                st.caption("You can close this tab. / Ya podés cerrar esta pestaña.")
+            else:
+                st.error(msg)
+    st.stop()
+
+
 def page_accounts():
     header(t("Settings", "Configuración"), t("Linked accounts", "Cuentas vinculadas"),
            t("Connection status and each account's voice (used by the AI).",
@@ -826,6 +921,8 @@ def page_accounts():
             c1.markdown(f"**{acc_label(acc)}**")
             c1.markdown(t("🟢 Linked", "🟢 Vinculada") if ok else t("⚪ Not linked (see README)", "⚪ Sin vincular (ver README)"))
             c1.caption(t(f"Last sync: {status}", f"Última sync: {status}"))
+            if acc == "ig_xb":
+                _instagram_connect(c1)
             v = c2.text_area(t("Account voice (write it in English or Spanish)", "Voz de la cuenta (en inglés o español)"),
                              value=ai.voice(acc), key=f"voice_{acc}", height=110)
             b1, b2, _ = c2.columns([1, 1, 2])
@@ -858,6 +955,8 @@ PAGES = [
 
 def main():
     inject_css()
+    privacy_page()
+    handle_instagram_return()
     user = login()
     if not st.session_state.get("synced_once"):
         st.session_state["synced_once"] = True
