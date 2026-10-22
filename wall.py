@@ -20,7 +20,10 @@ wall = Table(
     Column("added_by", String(60)),
     Column("added_at", String(30)),
 )
-db.md.create_all(db.engine)
+try:
+    db.md.create_all(db.engine)
+except Exception:  # noqa: BLE001
+    pass
 
 # Seed list of accounts to watch. "ig" / "li" are filled only where the handle was verified;
 # the rest have a 🔎 button so the team confirms the exact account once.

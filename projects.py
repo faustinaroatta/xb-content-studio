@@ -17,7 +17,10 @@ projects = Table(
     Column("notes", Text),
     Column("updated_at", String(30)),
 )
-db.md.create_all(db.engine)
+try:
+    db.md.create_all(db.engine)
+except Exception:  # noqa: BLE001
+    pass
 
 PHASES = ["Design", "Permits", "Under construction", "Finished", "On hold", "Other"]
 PHASES_ES = {"Design": "Diseño", "Permits": "Permisos", "Under construction": "En obra",

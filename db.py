@@ -15,7 +15,8 @@ for prefix in ("postgres://", "postgresql://", "postgresql+psycopg2://"):
         _url = "postgresql+psycopg://" + _url[len(prefix):]
         break
 
-engine = create_engine(_url, pool_pre_ping=True)
+_connect_args = {"connect_timeout": 10} if _url.startswith("postgresql") else {}
+engine = create_engine(_url, pool_pre_ping=True, pool_recycle=300, connect_args=_connect_args)
 md = MetaData()
 
 posts = Table(
@@ -75,7 +76,11 @@ metrics = Table(
 
 meta = Table("meta", md, Column("key", String(80), primary_key=True), Column("value", Text))
 
-md.create_all(engine)
+try:
+    md.create_all(engine)
+    DB_ERROR = ""
+except Exception as _e:  # noqa: BLE001 — shown nicely by app.py instead of an endless spinner
+    DB_ERROR = str(_e)[:300]
 
 
 def now():

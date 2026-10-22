@@ -34,7 +34,10 @@ photos = Table(
     Column("uploaded_by", String(60)),
     Column("uploaded_at", String(30)),
 )
-db.md.create_all(db.engine)
+try:
+    db.md.create_all(db.engine)
+except Exception:  # noqa: BLE001
+    pass
 
 TAGS = ["Exterior", "Interior", "Pool", "Drone", "Detail", "Twilight", "Kitchen", "Bath", "Living",
         "Facade", "Landscape", "Under construction", "Before", "After", "Team"]

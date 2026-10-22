@@ -1513,6 +1513,13 @@ PAGES = [
 
 def main():
     inject_css()
+    if db.DB_ERROR:
+        st.error(t("Can't reach the database right now (Supabase). Wait a minute and reload. If it keeps happening, "
+                   "check DATABASE_URL in Secrets or whether the Supabase project is paused.",
+                   "No se puede conectar con la base de datos (Supabase). Esperá un minuto y recargá. Si sigue, "
+                   "revisá DATABASE_URL en Secrets o si el proyecto de Supabase está pausado."))
+        st.caption(db.DB_ERROR)
+        st.stop()
     privacy_page()
     handle_instagram_return()
     user = login()
