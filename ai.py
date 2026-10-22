@@ -51,9 +51,11 @@ def _ask_gemini(prompt, max_tokens):
             "generationConfig": {"maxOutputTokens": max(max_tokens, 4096)}}
     last = ""
     for model in GEMINI_MODELS:   # if one model is busy or retired, try the next free one
-        r = requests.post(f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
-                          headers={"x-goog-api-key": str(key).strip(), "Content-Type": "application/json"},
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+        r = requests.post(url, headers={"x-goog-api-key": str(key).strip(), "Content-Type": "application/json"},
                           json=body, timeout=120)
+        if r.status_code in (400, 401, 403):
+            r = requests.post(url, params={"key": str(key).strip()}, json=body, timeout=120)
         if r.ok:
             parts = (r.json().get("candidates") or [{}])[0].get("content", {}).get("parts", [])
             text = "".join(p.get("text", "") for p in parts).strip()

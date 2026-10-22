@@ -74,6 +74,19 @@ def inject_css():
     .xb-idea {{ background: #fff; border: 1px solid {BRAND['line']}; padding: 14px 16px; margin-bottom: 4px; }}
     .xb-idea h4 {{ margin: 0 0 4px 0; font-size: 1.02rem; }}
     .xb-muted {{ color: {BRAND['grey']}; font-size: .8rem; }}
+    .xb-post {{ background:#fff; border:1px solid {BRAND['line']}; margin-bottom:6px; overflow:hidden; }}
+    .xb-post .hd {{ display:flex; align-items:center; gap:10px; padding:10px 12px; }}
+    .xb-post .av {{ width:34px; height:34px; border-radius:50%; background:{BRAND['black']}; color:#fff;
+                    display:flex; align-items:center; justify-content:center; font-family:{SANS};
+                    font-size:.72rem; letter-spacing:.06em; flex:none; }}
+    .xb-post .who {{ font-size:.86rem; line-height:1.2; color:{BRAND['black']}; font-weight:600; }}
+    .xb-post .meta {{ font-size:.72rem; color:{BRAND['grey']}; font-weight:400; }}
+    .xb-post .img {{ width:100%; aspect-ratio: 4 / 5; object-fit:cover; display:block; background:{BRAND['light']}; }}
+    .xb-post .noimg {{ width:100%; aspect-ratio: 4 / 5; background:{BRAND['black']}; color:#fff; display:flex;
+                       align-items:flex-end; padding:18px; font-family:{SANS}; font-size:1.3rem; line-height:1.25; }}
+    .xb-post .bd {{ padding:10px 12px 12px 12px; font-size:.86rem; line-height:1.4; color:#222; }}
+    .xb-post .bd b {{ display:block; margin-bottom:4px; font-size:.92rem; }}
+    .xb-post .cap {{ display:-webkit-box; -webkit-line-clamp:4; -webkit-box-orient:vertical; overflow:hidden; }}
     </style>""", unsafe_allow_html=True)
 
 
@@ -626,20 +639,23 @@ def _inspo_feed(user):
         st.info(t("Nothing matches. Try another search or a longer period.",
                   "No hay resultados. Probá otra búsqueda o un período más largo."))
     limit = st.session_state.get("if_limit", 24)
-    cols = st.columns(2, gap="medium")
+    cols = st.columns(3, gap="medium")
     for k, i in enumerate(shown[:limit]):
-        with cols[k % 2]:
-            studio = f" · <b>{html.escape(i['studio'])}</b>" if i["studio"] else ""
+        with cols[k % 3]:
+            who = html.escape(i["studio"] or i["source"])
+            initials = "".join(w[0] for w in (i["studio"] or i["source"]).split()[:2]).upper() or "XB"
+            visual = (f"<img class='img' src='{html.escape(i['image'])}' loading='lazy' referrerpolicy='no-referrer'>"
+                      if i.get("image") else f"<div class='noimg'>{html.escape(i['title'])}</div>")
             st.markdown(
-                f"<div class='xb-idea'><div class='xb-muted'><span class='xb-chip'>{html.escape(i['source'])}</span>"
-                f"{studio} · {_ago(i['published'])}</div>"
-                f"<h4 style='margin-top:8px'>{html.escape(i['title'])}</h4>"
-                f"<p style='margin:6px 0 2px 0;font-size:.9rem'>{html.escape(i['summary'])}</p></div>",
+                f"<div class='xb-post'><div class='hd'><div class='av'>{html.escape(initials)}</div>"
+                f"<div><div class='who'>{who}</div><div class='meta'>{html.escape(i['source'])} · {_ago(i['published'])}</div></div></div>"
+                f"{visual}<div class='bd'><b>{html.escape(i['title'])}</b>"
+                f"<div class='cap'>{html.escape(i['summary'])}</div></div></div>",
                 unsafe_allow_html=True)
-            b1, b2, b3 = st.columns([1, 1.3, 1.1])
-            b1.link_button(t("Open", "Abrir"), i["link"], width="stretch")
+            b1, b2, b3 = st.columns([1, 1.25, 1])
+            b1.link_button("↗", i["link"], help=t("Open the full post", "Abrir la publicación completa"), width="stretch")
             key = f"ad_{abs(hash(i['link']))}"
-            if b2.button(t("✨ Adapt for XB", "✨ Adaptar para XB"), key=key, width="stretch"):
+            if b2.button(t("✨ Adapt", "✨ Adaptar"), key=key, width="stretch", help=t("Turn it into an XB post", "Convertirlo en un posteo de XB")):
                 with st.spinner(t("Thinking…", "Pensando…")):
                     try:
                         st.session_state[key + "_r"] = ai.adapt_inspo(
@@ -647,7 +663,7 @@ def _inspo_feed(user):
                             "Spanish" if is_es() else "English")
                     except Exception as e:  # noqa: BLE001
                         st.error(str(e))
-            if b3.button(t("💾 Save", "💾 Guardar"), key=key + "_s", width="stretch"):
+            if b3.button("💾", key=key + "_s", width="stretch", help=t("Save to the idea bank", "Guardar en el banco de ideas")):
                 db.insert_row(db.ideas, dict(title=i["title"][:240], description=i["summary"], pillar="Trends & Inspiration",
                                              format="Carousel", account="ig_xb", inspo=i["link"][:240], source="Team",
                                              votes=0, voters="", status="New", created_by=user, created_at=db.now()))

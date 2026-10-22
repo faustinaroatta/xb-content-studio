@@ -20,6 +20,19 @@ FEEDS = [
 
 UA = {"User-Agent": "Mozilla/5.0 (XB Content Studio; +https://xb-content-studio.streamlit.app/?privacy)"}
 NS_CONTENT = "{http://purl.org/rss/1.0/modules/content/}encoded"
+NS_MEDIA = "{http://search.yahoo.com/mrss/}"
+
+
+def _image(it, desc, body):
+    enc = it.find("enclosure")
+    if enc is not None and (enc.get("type", "image").startswith("image")) and enc.get("url"):
+        return enc.get("url")
+    for tag in ("content", "thumbnail"):
+        m = it.find(NS_MEDIA + tag)
+        if m is not None and m.get("url"):
+            return m.get("url")
+    m = re.search(r"<img[^>]+src=[\"']([^\"']+)", (body or "") + (desc or ""))
+    return html.unescape(m.group(1)) if m else ""
 
 
 def _clean(text, limit=380):
@@ -64,6 +77,7 @@ def parse(xml_bytes, source):
         items.append({
             "source": source, "title": title, "link": link, "summary": summary,
             "studio": _studio(title, source), "published": _date(it.findtext("pubDate")),
+            "image": _image(it, desc, body),
         })
     return items
 
