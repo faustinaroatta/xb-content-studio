@@ -44,10 +44,23 @@ Write like a premium architecture studio: precise, sensory, confident.
 Always write the content in the language requested in each message."""
 
 
-def _ask_gemini(prompt, max_tokens):
+def _system():
+    try:
+        import projects
+        ctx = projects.context_for_ai()
+    except Exception:  # noqa: BLE001
+        ctx = ""
+    return SYSTEM + ("\n\n" + ctx if ctx else "")
+
+
+def _ask_gemini(prompt, max_tokens, image=None):
+    import base64
     key = get_secret("GEMINI_API_KEY")
-    body = {"system_instruction": {"parts": [{"text": SYSTEM}]},
-            "contents": [{"role": "user", "parts": [{"text": prompt}]}],
+    parts = [{"text": prompt}]
+    if image:
+        parts.append({"inline_data": {"mime_type": image[1], "data": base64.b64encode(image[0]).decode()}})
+    body = {"system_instruction": {"parts": [{"text": _system()}]},
+            "contents": [{"role": "user", "parts": parts}],
             "generationConfig": {"maxOutputTokens": max(max_tokens, 4096)}}
     last = ""
     for model in GEMINI_MODELS:   # if one model is busy or retired, try the next free one
@@ -63,7 +76,8 @@ def _ask_gemini(prompt, max_tokens):
             raise RuntimeError("Gemini rejected the key (it may have been deleted or mistyped). Create a new key in "
                                "aistudio.google.com/api-keys and paste it in Secrets → GEMINI_API_KEY. / "
                                "Gemini rechazó la clave (puede estar borrada o mal copiada). Creá una nueva en "
-                               "aistudio.google.com/api-keys y pegala en Secrets → GEMINI_API_KEY.")
+                               "aistudio.google.com/api-keys y pegala en Secrets → GEMINI_API_KEY. "
+                               f"[Google: {r.text[:180]}]")
         if r.ok:
             parts = (r.json().get("candidates") or [{}])[0].get("content", {}).get("parts", [])
             text = "".join(p.get("text", "") for p in parts).strip()
@@ -75,20 +89,26 @@ def _ask_gemini(prompt, max_tokens):
     raise RuntimeError(f"Gemini error / error de Gemini — {last}")
 
 
-def _ask_claude(prompt, max_tokens):
+def _ask_claude(prompt, max_tokens, image=None):
+    import base64
     from anthropic import Anthropic
+    content = prompt
+    if image:
+        content = [{"type": "image", "source": {"type": "base64", "media_type": image[1],
+                                                "data": base64.b64encode(image[0]).decode()}},
+                   {"type": "text", "text": prompt}]
     msg = Anthropic(api_key=get_secret("ANTHROPIC_API_KEY")).messages.create(
-        model=CLAUDE_MODEL, max_tokens=max_tokens, system=SYSTEM,
-        messages=[{"role": "user", "content": prompt}])
+        model=CLAUDE_MODEL, max_tokens=max_tokens, system=_system(),
+        messages=[{"role": "user", "content": content}])
     return "".join(b.text for b in msg.content if b.type == "text").strip()
 
 
-def _ask(prompt, max_tokens=2500):
+def _ask(prompt, max_tokens=2500, image=None):
     p = provider()
     if p == "gemini":
-        return _ask_gemini(prompt, max_tokens)
+        return _ask_gemini(prompt, max_tokens, image)
     if p == "anthropic":
-        return _ask_claude(prompt, max_tokens)
+        return _ask_claude(prompt, max_tokens, image)
     raise _missing_key()
 
 
@@ -154,7 +174,7 @@ Take inspiration from the APPROACH (not the content) of these reference accounts
 Pillars to cover: {', '.join(pillars) or 'any'}
 Possible accounts: {acc_txt}
 Extra context: {extra or '—'}
-Use the real projects when it makes sense (North Miami, Royal Palm, Sea Island, Coral Ridge, Surfside, Plantation Acres).
+Use XB's real projects from the project list (and match the idea to each project's phase) when it makes sense.
 Write "title", "description" and "inspo" in {language if not language.startswith('Bilingual') else 'English'}.
 Return ONLY a JSON list of objects with keys
 "title" (short hook), "description" (how to execute it: shots, slides, script in 2-4 sentences),
@@ -190,10 +210,39 @@ Summary: {summary}
 
 Propose ONE concrete post idea for XB Architecture inspired by the APPROACH or topic of this news
 (format, angle, storytelling, innovation) — never copy it or claim their work. Connect it to XB's real
-projects (North Miami, Royal Palm, Sea Island, Coral Ridge, Surfside, Plantation Acres) when it makes sense.
+projects from the project list when it makes sense.
 Possible accounts: {acc_txt}.
 Write everything in {language if not language.startswith('Bilingual') else 'English'}.
 Return ONLY JSON: {{"title": "...", "why": "what to borrow from the reference, 1 sentence",
 "description": "how to execute it, 2-4 sentences", "caption": "a ready-to-edit caption draft",
 "pillar": one of {PILLARS}, "format": one of {FORMATS}, "account": one of {list(accounts)}}}"""
     return _json(_ask(p, 2500))
+
+
+
+def extract_projects(text="", image=None):
+    """Reads a Monograph export (table text, pasted text or screenshot) and returns a clean project list."""
+    p = f"""This is an export / copy / screenshot of XB Architecture's project list from their project
+management software (Monograph). Extract every PROJECT (ignore totals, invoices, hours, fees, money and people).
+For each project return: "name" (short project name as written), "location" (city/neighborhood if present, else ""),
+"phase" (one of: Design, Permits, Under construction, Finished, On hold, Other — infer from status/phase columns),
+"type" (e.g. single-family residence, renovation, multifamily — if present, else ""), "notes" (max 1 short line or "").
+Never include fees, budgets, client names or personal data.
+Return ONLY a JSON list.
+DATA:
+{text[:28000]}"""
+    return _json(_ask(p, 6000, image))
+
+
+def project_ideas(project, accounts, language, n=4):
+    acc_txt = ", ".join(f"{k} ({ACCOUNTS[k]['label']})" for k in accounts)
+    p = f"""Propose {n} post ideas about this XB project, perfect for its current phase:
+Project: {project.get('name')} · Location: {project.get('location') or '—'} · Phase: {project.get('phase')}
+Type: {project.get('type') or '—'} · Notes: {project.get('notes') or '—'}
+Phase guide: Design → process, sketches, renders, design decisions; Permits → behind the scenes, challenges;
+Under construction → progress, structure, details, site visits, team; Finished → reveal, walkthrough, before & after,
+details, client experience, awards-style storytelling.
+Possible accounts: {acc_txt}. Write in {language if not language.startswith('Bilingual') else 'English'}.
+Return ONLY a JSON list of objects with "title", "description" (2-3 sentences on how to execute it),
+"pillar" (one of {PILLARS}), "format" (one of {FORMATS}), "account" (one of {list(accounts)}), "inspo" ("")."""
+    return _json(_ask(p, 3000))

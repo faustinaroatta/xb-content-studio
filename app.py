@@ -15,6 +15,7 @@ import streamlit as st
 import ai
 import db
 import ig_oauth
+import projects
 import ig_discovery
 import wall
 import integrations
@@ -384,6 +385,10 @@ def page_home():
     pend = posts[posts["status"].isin(["Draft", "In review"])] if not posts.empty else posts
     last30 = m[m["published_at"] >= pd.Timestamp(today - dt.timedelta(days=30))] if not m.empty else m
 
+    pdays = _days_since(projects.last_update())
+    if pdays is None or pdays >= 7:
+        st.warning(t("⏰ Weekly reminder: upload the Monograph project list in 🏗️ Projects so the AI knows what's new.",
+                     "⏰ Recordatorio semanal: subí la lista de proyectos de Monograph en 🏗️ Proyectos para que la IA sepa qué hay de nuevo."))
     c = st.columns(4)
     c[0].metric(t("Posts this week", "Posts esta semana"), len(week))
     c[1].metric(t("Pending review", "Pendientes de revisión"), len(pend))
@@ -815,6 +820,117 @@ REWRITE_OPTIONS = [
 ]
 
 
+def _days_since(ts):
+    try:
+        return (dt.datetime.now() - dt.datetime.fromisoformat(ts)).days
+    except (TypeError, ValueError):
+        return None
+
+
+def _phase_label(ph):
+    return f"{projects.PHASE_ICON.get(ph, '•')} {projects.PHASES_ES.get(ph, ph) if is_es() else ph}"
+
+
+def page_projects():
+    user = st.session_state["user"]
+    header("Monograph", t("XB projects", "Proyectos de XB"),
+           t("Upload your project list once a week. The AI uses it in every idea, plan and caption, matched to each phase.",
+             "Subí la lista de proyectos una vez por semana. La IA la usa en todas las ideas, planes y copys, según la fase de cada uno."))
+    last = projects.last_update()
+    days = _days_since(last)
+    if days is None:
+        st.info(t("No projects yet. Upload your first Monograph export below 👇", "Todavía no hay proyectos. Subí el primer export de Monograph abajo 👇"))
+    elif days >= 7:
+        st.warning(t(f"⏰ The project list is {days} days old — upload this week's Monograph export.",
+                     f"⏰ La lista de proyectos tiene {days} días — subí el export de Monograph de esta semana."))
+    else:
+        st.caption(t(f"✅ Updated {days} day(s) ago by {db.get_meta('projects_updated_by') or '—'}",
+                     f"✅ Actualizada hace {days} día(s) por {db.get_meta('projects_updated_by') or '—'}"))
+
+    with st.expander(t("⬆️ Weekly update from Monograph", "⬆️ Actualización semanal desde Monograph"), expanded=days is None or days >= 7):
+        st.markdown(t("Use **any** of these — the AI understands whatever Monograph gives you:",
+                      "Usá **cualquiera** de estas opciones — la IA entiende lo que te dé Monograph:"))
+        c1, c2 = st.columns(2)
+        up = c1.file_uploader(t("Excel / CSV export or a screenshot of the projects list",
+                                "Export Excel / CSV o captura de pantalla de la lista de proyectos"),
+                              type=["csv", "xlsx", "xls", "png", "jpg", "jpeg"], key="proj_up")
+        pasted = c2.text_area(t("…or copy the projects table in Monograph and paste it here",
+                                "…o copiá la tabla de proyectos en Monograph y pegala acá"), height=150, key="proj_paste")
+        if st.button(t("✨ Read projects", "✨ Leer proyectos"), type="primary", disabled=not (up or pasted.strip())):
+            with st.spinner(t("Reading the projects…", "Leyendo los proyectos…")):
+                try:
+                    if up is not None and up.name.lower().endswith((".png", ".jpg", ".jpeg")):
+                        mime = "image/png" if up.name.lower().endswith(".png") else "image/jpeg"
+                        rows = ai.extract_projects(pasted, image=(up.getvalue(), mime))
+                    else:
+                        text = projects.read_table(up.getvalue(), up.name) if up is not None else ""
+                        rows = ai.extract_projects((text + "\n" + pasted).strip())
+                    for r in rows:
+                        r["phase"] = projects.normalize_phase(r.get("phase"))
+                    st.session_state["proj_preview"] = rows
+                except Exception as e:  # noqa: BLE001
+                    st.error(str(e))
+        prev = st.session_state.get("proj_preview")
+        if prev:
+            st.markdown(t("**Check and fix anything before saving:**", "**Revisá y corregí lo que haga falta antes de guardar:**"))
+            edited = st.data_editor(pd.DataFrame(prev, columns=["name", "location", "phase", "type", "notes"]),
+                                    num_rows="dynamic", width="stretch", key="proj_editor",
+                                    column_config={"name": t("Project", "Proyecto"), "location": t("Location", "Ubicación"),
+                                                   "phase": st.column_config.SelectboxColumn(t("Phase", "Fase"), options=projects.PHASES),
+                                                   "type": t("Type", "Tipo"), "notes": t("Notes", "Notas")})
+            rows = [{k: ("" if pd.isna(v) else v) for k, v in r.items()} for r in edited.to_dict("records")]
+            added, changed, removed = projects.diff(rows)
+            if added or changed or removed:
+                st.markdown(t("**What changed since last week:**", "**Qué cambió desde la semana pasada:**"))
+                for n in added:
+                    st.markdown(f"🆕 **{n}**")
+                for n, o, nw in changed:
+                    st.markdown(f"🔁 **{n}**: {_phase_label(o)} → {_phase_label(nw)}" + (" 🎉" if nw == "Finished" else ""))
+                for n in removed:
+                    st.markdown(f"➖ ~~{n}~~")
+            if st.button(t("💾 Save project list", "💾 Guardar lista de proyectos"), type="primary"):
+                projects.replace_all(rows, user)
+                st.session_state["proj_just_finished"] = [n for n, o, nw in changed if nw == "Finished"]
+                del st.session_state["proj_preview"]
+                st.rerun()
+
+    for n in st.session_state.get("proj_just_finished", []):
+        st.success(t(f"🎉 {n} is finished — time for a reveal! Use ✨ on its card below.",
+                     f"🎉 ¡{n} está terminado — es momento de un reveal! Usá ✨ en su tarjeta de abajo."))
+
+    df = projects.current()
+    if df.empty:
+        return
+    phases = [p for p in projects.PHASES if p in set(df["phase"])]
+    pick = st.multiselect(t("Phase", "Fase"), phases, default=phases, format_func=_phase_label, key="proj_phase")
+    df = df[df["phase"].isin(pick)]
+    order = {p: i for i, p in enumerate(["Finished", "Under construction", "Design", "Permits", "On hold", "Other"])}
+    df = df.assign(_o=df["phase"].map(order)).sort_values(["_o", "name"])
+    lang = "Spanish" if is_es() else "English"
+    cols = st.columns(3, gap="medium")
+    for k, (_, r) in enumerate(df.iterrows()):
+        with cols[k % 3]:
+            with st.container(border=True):
+                st.markdown(f"<span class='xb-chip'>{_phase_label(r['phase'])}</span>", unsafe_allow_html=True)
+                st.markdown(f"**{html.escape(str(r['name']))}**")
+                st.caption(" · ".join(x for x in [str(r["location"] or ""), str(r["type"] or "")] if x) or "—")
+                key = f"pj_{r['id']}"
+                if st.button(t("✨ Post ideas for this project", "✨ Ideas de posteos para este proyecto"), key=key, width="stretch"):
+                    with st.spinner(t("Thinking…", "Pensando…")):
+                        try:
+                            st.session_state[key + "_r"] = ai.project_ideas(dict(r), ACC_KEYS, lang)
+                        except Exception as e:  # noqa: BLE001
+                            st.error(str(e))
+                for j, g in enumerate(st.session_state.get(key + "_r", [])):
+                    st.markdown(f"**{html.escape(g.get('title', ''))}**  \n<span class='xb-muted'>{opt(g.get('format'))} · "
+                                f"{acc_label(g.get('account'))}</span>", unsafe_allow_html=True)
+                    st.caption(g.get("description", ""))
+                    if st.button(t("💾 Save idea", "💾 Guardar idea"), key=f"{key}_s{j}"):
+                        g = dict(g, inspo=f"Project: {r['name']}")
+                        _save_ai_idea(g, user)
+                        st.toast(t("Saved to the idea bank", "Guardada en el banco de ideas"))
+
+
 def page_copy():
     user = st.session_state["user"]
     header("AI", t("Caption studio", "Estudio de copys"),
@@ -1168,6 +1284,7 @@ PAGES = [
     ("home", ("Home", "Inicio"), page_home),
     ("calendar", ("Calendar", "Calendario"), page_calendar),
     ("ideas", ("Ideas", "Ideas"), page_ideas),
+    ("projects", ("Projects", "Proyectos"), page_projects),
     ("copy", ("AI Captions", "Copys IA"), page_copy),
     ("reports", ("Reports", "Reportes"), page_reports),
     ("accounts", ("Accounts", "Cuentas"), page_accounts),

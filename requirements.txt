@@ -5,3 +5,4 @@ SQLAlchemy>=2.0
 psycopg[binary]>=3.2.10
 anthropic>=0.40
 requests>=2.31
+openpyxl>=3.1
