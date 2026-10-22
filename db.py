@@ -8,8 +8,12 @@ from sqlalchemy import (Column, Integer, MetaData, String, Table, Text, and_,
 from config import get_secret
 
 _url = get_secret("DATABASE_URL") or "sqlite:///xb_content.db"
-if _url.startswith("postgres://"):
-    _url = _url.replace("postgres://", "postgresql://", 1)
+_url = str(_url).strip()
+# Use the psycopg (v3) driver explicitly — works on every Python version Streamlit Cloud uses.
+for prefix in ("postgres://", "postgresql://", "postgresql+psycopg2://"):
+    if _url.startswith(prefix):
+        _url = "postgresql+psycopg://" + _url[len(prefix):]
+        break
 
 engine = create_engine(_url, pool_pre_ping=True)
 md = MetaData()
