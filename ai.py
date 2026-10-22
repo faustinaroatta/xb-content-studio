@@ -58,8 +58,8 @@ def _ask_gemini(prompt, max_tokens, image=None, json_mode=False):
     import base64
     key = get_secret("GEMINI_API_KEY")
     parts = [{"text": prompt}]
-    if image:
-        parts.append({"inline_data": {"mime_type": image[1], "data": base64.b64encode(image[0]).decode()}})
+    for img in (image if isinstance(image, list) else [image] if image else []):
+        parts.append({"inline_data": {"mime_type": img[1], "data": base64.b64encode(img[0]).decode()}})
     body = {"system_instruction": {"parts": [{"text": _system()}]},
             "contents": [{"role": "user", "parts": parts}],
             "generationConfig": {"maxOutputTokens": max(max_tokens, 4096),
@@ -95,10 +95,10 @@ def _ask_claude(prompt, max_tokens, image=None):
     import base64
     from anthropic import Anthropic
     content = prompt
-    if image:
-        content = [{"type": "image", "source": {"type": "base64", "media_type": image[1],
-                                                "data": base64.b64encode(image[0]).decode()}},
-                   {"type": "text", "text": prompt}]
+    imgs = image if isinstance(image, list) else [image] if image else []
+    if imgs:
+        content = [{"type": "image", "source": {"type": "base64", "media_type": m, "data": base64.b64encode(b).decode()}}
+                   for b, m in imgs] + [{"type": "text", "text": prompt}]
     msg = Anthropic(api_key=get_secret("ANTHROPIC_API_KEY")).messages.create(
         model=CLAUDE_MODEL, max_tokens=max_tokens, system=_system(),
         messages=[{"role": "user", "content": content}])
@@ -289,3 +289,16 @@ Possible accounts: {acc_txt}. Write in {language if not language.startswith('Bil
 Return ONLY a JSON list of objects with "title", "description" (2-3 sentences on how to execute it),
 "pillar" (one of {PILLARS}), "format" (one of {FORMATS}), "account" (one of {list(accounts)}), "inspo" ("")."""
     return _as_list(_json(_ask(p, 3000, json_mode=True)))
+
+
+
+def caption_from_photos(images, project, account, fmt, language, extra=""):
+    """Looks at the selected photos and writes the post (and slide order for carousels)."""
+    p = f"""{_acc_block(account)}
+Look at these {len(images)} photo(s) of an XB Architecture project and write a ready-to-publish post.
+Project: {project or 'XB project'} · Format: {fmt} · {_lang_rule(language)}
+Extra notes: {extra or '—'}
+Describe what is really visible (materials, light, spaces, views) — no invented facts, no addresses or client names.
+If it's a carousel, end with "ORDER:" suggesting the best photo order (1, 2, 3…) and why the first one hooks.
+Return only the post text."""
+    return _ask(p, 2500, images)

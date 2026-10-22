@@ -15,6 +15,7 @@ import streamlit as st
 import ai
 import db
 import ig_oauth
+import photos
 import projects
 import ig_discovery
 import wall
@@ -851,23 +852,30 @@ def page_projects():
         st.markdown(t("Use **any** of these — the AI understands whatever Monograph gives you:",
                       "Usá **cualquiera** de estas opciones — la IA entiende lo que te dé Monograph:"))
         c1, c2 = st.columns(2)
-        up = c1.file_uploader(t("Excel / CSV export or a screenshot of the projects list",
-                                "Export Excel / CSV o captura de pantalla de la lista de proyectos"),
-                              type=["csv", "xlsx", "xls", "png", "jpg", "jpeg"], key="proj_up")
+        ups = c1.file_uploader(t("Excel / CSV export or screenshots of the projects list (you can select several)",
+                                 "Export Excel / CSV o capturas de la lista de proyectos (podés elegir varias)"),
+                               type=["csv", "xlsx", "xls", "png", "jpg", "jpeg"], key="proj_up", accept_multiple_files=True)
         pasted = c2.text_area(t("…or copy the projects table in Monograph and paste it here",
                                 "…o copiá la tabla de proyectos en Monograph y pegala acá"), height=150, key="proj_paste")
-        if st.button(t("✨ Read projects", "✨ Leer proyectos"), type="primary", disabled=not (up or pasted.strip())):
+        if st.button(t("✨ Read projects", "✨ Leer proyectos"), type="primary", disabled=not (ups or pasted.strip())):
             with st.spinner(t("Reading the projects…", "Leyendo los proyectos…")):
                 try:
-                    if up is not None and up.name.lower().endswith((".png", ".jpg", ".jpeg")):
-                        mime = "image/png" if up.name.lower().endswith(".png") else "image/jpeg"
-                        rows = ai.extract_projects(pasted, image=(up.getvalue(), mime))
-                    else:
-                        text = projects.read_table(up.getvalue(), up.name) if up is not None else ""
-                        rows = ai.extract_projects((text + "\n" + pasted).strip())
+                    rows, texts = [], []
+                    for f in ups or []:
+                        if f.name.lower().endswith((".png", ".jpg", ".jpeg")):
+                            mime = "image/png" if f.name.lower().endswith(".png") else "image/jpeg"
+                            rows += ai.extract_projects("", image=(f.getvalue(), mime))
+                        else:
+                            texts.append(projects.read_table(f.getvalue(), f.name))
+                    if texts or pasted.strip():
+                        rows += ai.extract_projects(("\n".join(texts) + "\n" + pasted).strip())
+                    merged = {}
                     for r in rows:
                         r["phase"] = projects.normalize_phase(r.get("phase"))
-                    st.session_state["proj_preview"] = rows
+                        key_ = str(r.get("name") or "").strip().lower()
+                        if key_ and key_ not in merged:
+                            merged[key_] = r
+                    st.session_state["proj_preview"] = list(merged.values())
                 except Exception as e:  # noqa: BLE001
                     st.error(str(e))
         prev = st.session_state.get("proj_preview")
@@ -907,6 +915,8 @@ def page_projects():
     order = {p: i for i, p in enumerate(["Finished", "Under construction", "Design", "Permits", "On hold", "Other"])}
     df = df.assign(_o=df["phase"].map(order)).sort_values(["_o", "name"])
     lang = "Spanish" if is_es() else "English"
+    ph_df = photos.all_photos()
+    ph_counts = photos.counts_by_project()
     cols = st.columns(3, gap="medium")
     for k, (_, r) in enumerate(df.iterrows()):
         with cols[k % 3]:
@@ -914,6 +924,17 @@ def page_projects():
                 st.markdown(f"<span class='xb-chip'>{_phase_label(r['phase'])}</span>", unsafe_allow_html=True)
                 st.markdown(f"**{html.escape(str(r['name']))}**")
                 st.caption(" · ".join(x for x in [str(r["location"] or ""), str(r["type"] or "")] if x) or "—")
+                pk = photos.project_key(r["name"])
+                n_ph = ph_counts.get(pk, 0)
+                if n_ph:
+                    paths = ph_df[ph_df["project_key"] == pk].sort_values("favorite", ascending=False)["path_thumb"].head(3).tolist()
+                    th = photos.urls(paths)
+                    st.markdown("<div style='display:flex;gap:4px'>" + "".join(
+                        f"<img src='{th.get(pp, '')}' style='width:33%;aspect-ratio:1/1;object-fit:cover'>" for pp in paths) + "</div>",
+                        unsafe_allow_html=True)
+                st.button(t(f"📷 Photos ({n_ph})", f"📷 Fotos ({n_ph})"), key=f"pjph_{r['id']}", width="stretch",
+                          on_click=_nav_to, args=("photos",),
+                          kwargs=dict(ph_proj=pk if n_ph else "all", ph_open=not n_ph, ph_up_proj=str(r["name"]), ph_page=1))
                 key = f"pj_{r['id']}"
                 if st.button(t("✨ Post ideas for this project", "✨ Ideas de posteos para este proyecto"), key=key, width="stretch"):
                     with st.spinner(t("Thinking…", "Pensando…")):
@@ -929,6 +950,204 @@ def page_projects():
                         g = dict(g, inspo=f"Project: {r['name']}")
                         _save_ai_idea(g, user)
                         st.toast(t("Saved to the idea bank", "Guardada en el banco de ideas"))
+
+
+def _tag_label(tg):
+    return photos.TAGS_ES.get(tg, tg) if is_es() else tg
+
+
+def _nav_to(page, **state):
+    """Use as on_click callback (runs before widgets are drawn)."""
+    for k, v in state.items():
+        st.session_state[k] = v
+    st.session_state["page"] = page
+    st.session_state[f"nav_{st.session_state.get('lang', 'en')}"] = page
+
+
+def _project_options():
+    names = []
+    dfp = projects.current()
+    if not dfp.empty:
+        names += [str(n) for n in dfp["name"].tolist()]
+    dph = photos.all_photos()
+    if not dph.empty:
+        names += [n for n in dph["project_name"].dropna().unique().tolist() if n and n not in names]
+    return names
+
+
+def page_photos():
+    user = st.session_state["user"]
+    header(t("Photographer", "Fotógrafo"), t("Photos", "Fotos"),
+           t("Upload the photographer's shoots by project. They're optimized automatically for social media.",
+             "Subí las sesiones del fotógrafo por proyecto. Se optimizan solas para redes."))
+    cloud_without_storage = photos.backend() == "local" and bool(get_secret("DATABASE_URL"))
+    if cloud_without_storage:
+        st.warning(t("To store photos permanently, add SUPABASE_URL and SUPABASE_SERVICE_KEY to Secrets (see README). "
+                     "Uploads are disabled until then.",
+                     "Para guardar fotos de forma permanente, agregá SUPABASE_URL y SUPABASE_SERVICE_KEY en Secrets (ver README). "
+                     "Hasta entonces, la subida está desactivada."))
+    names = _project_options()
+    NONE, OTHER = "— none —", "✏️ other"
+
+    with st.expander(t("⬆️ Upload photos", "⬆️ Subir fotos"), expanded=st.session_state.get("ph_open", False)):
+        c1, c2 = st.columns(2)
+        proj = c1.selectbox(t("Project", "Proyecto"), [NONE] + names + [OTHER], key="ph_up_proj",
+                            format_func=lambda v: t("— No project —", "— Sin proyecto —") if v == NONE
+                            else t("✏️ Other name…", "✏️ Otro nombre…") if v == OTHER else v)
+        if proj == OTHER:
+            proj = c1.text_input(t("Project name", "Nombre del proyecto"), key="ph_up_other")
+        tags = c2.multiselect(t("Tags (optional)", "Etiquetas (opcional)"), photos.TAGS, format_func=_tag_label, key="ph_up_tags")
+        c3, c4 = st.columns(2)
+        who = c3.text_input(t("Photographer (optional)", "Fotógrafo (opcional)"), key="ph_up_who")
+        when = c4.date_input(t("Shoot date", "Fecha de la sesión"), value=dt.date.today(), format=date_fmt(), key="ph_up_date")
+        files = st.file_uploader(t("Photos (select as many as you want)", "Fotos (elegí todas las que quieras)"),
+                                 type=["jpg", "jpeg", "png", "webp", "tif", "tiff"], accept_multiple_files=True, key="ph_up_files",
+                                 disabled=cloud_without_storage)
+        if st.button(t(f"⬆️ Upload {len(files or [])} photos", f"⬆️ Subir {len(files or [])} fotos"), type="primary",
+                     disabled=not files or cloud_without_storage):
+            bar = st.progress(0.0)
+            ok, failed, total = 0, [], 0
+            for i, f in enumerate(files):
+                try:
+                    total += photos.add_photo(f.getvalue(), f.name, "" if proj == NONE else proj, tags, who,
+                                              when.isoformat(), user)
+                    ok += 1
+                except Exception as e:  # noqa: BLE001
+                    failed.append(f"{f.name}: {str(e)[:80]}")
+                bar.progress((i + 1) / len(files), text=f"{i + 1}/{len(files)}")
+            st.success(t(f"{ok} photos uploaded ({total / 1e6:.1f} MB after optimizing).",
+                         f"{ok} fotos subidas ({total / 1e6:.1f} MB después de optimizar)."))
+            if failed:
+                st.error("\n".join(failed[:10]))
+            st.session_state["ph_proj"] = photos.project_key(proj) if proj and proj != NONE else "all"
+
+    df = photos.all_photos()
+    if df.empty:
+        st.info(t("No photos yet. Upload the first shoot above ☝️", "Todavía no hay fotos. Subí la primera sesión arriba ☝️"))
+        return
+    keys = df.groupby(["project_key"]).agg(name=("project_name", "first"), n=("id", "count")).reset_index()
+    opts = ["all"] + keys["project_key"].tolist()
+    labels = {"all": t(f"All projects ({len(df)})", f"Todos los proyectos ({len(df)})")}
+    for _, r in keys.iterrows():
+        labels[r["project_key"]] = f"{r['name'] or t('No project', 'Sin proyecto')} ({r['n']})"
+    if st.session_state.get("ph_proj") not in opts:
+        st.session_state["ph_proj"] = "all"
+    f1, f2, f3, f4 = st.columns([2, 2, 1, 1])
+    proj_sel = f1.selectbox(t("Project", "Proyecto"), opts, format_func=labels.get, key="ph_proj")
+    ftags = f2.multiselect(t("Tags", "Etiquetas"), photos.TAGS, format_func=_tag_label, key="ph_ftags")
+    fav = f3.toggle("⭐", key="ph_fav", help=t("Only favorites", "Solo favoritas"))
+    unused = f4.toggle(t("Unused", "Sin usar"), key="ph_unused", help=t("Not posted yet", "Todavía no publicadas"))
+    view = df if proj_sel == "all" else df[df["project_key"] == proj_sel]
+    if ftags:
+        view = view[view["tags"].fillna("").apply(lambda x: any(tg in x.split(",") for tg in ftags))]
+    if fav:
+        view = view[view["favorite"].fillna(False).astype(bool)]
+    if unused:
+        view = view[~view["used"].fillna(False).astype(bool)]
+    view = view.sort_values("uploaded_at", ascending=False)
+
+    per_page = 24
+    pages = max(1, -(-len(view) // per_page))
+    page_n = st.session_state.get("ph_page", 1)
+    page_n = min(max(1, page_n), pages)
+    chunk = view.iloc[(page_n - 1) * per_page: page_n * per_page]
+    thumb_urls = photos.urls(chunk["path_thumb"].tolist())
+    web_urls = photos.urls(chunk["path_web"].tolist())
+    selected = [int(i) for i in view["id"] if st.session_state.get(f"ph_sel_{int(i)}")]
+
+    cols = st.columns(4, gap="small")
+    for k, (_, r) in enumerate(chunk.iterrows()):
+        pid = int(r["id"])
+        with cols[k % 4]:
+            u = thumb_urls.get(r["path_thumb"], "")
+            badges = ("⭐ " if r["favorite"] else "") + ("✅ " if r["used"] else "")
+            st.markdown(f"<div style='position:relative'><img src='{u}' style='width:100%;aspect-ratio:1/1;object-fit:cover;"
+                        f"display:block;background:#eee'><div style='position:absolute;top:6px;left:8px;font-size:.9rem'>{badges}</div></div>",
+                        unsafe_allow_html=True)
+            a, b = st.columns([1, 1])
+            a.checkbox(t("Select", "Elegir"), key=f"ph_sel_{pid}")
+            if web_urls.get(r["path_web"]):
+                b.link_button("⬇", web_urls[r["path_web"]], width="stretch", help=t("Open / download", "Abrir / descargar"))
+            st.caption(f"{r['project_name'] or '—'} · {', '.join(_tag_label(x) for x in (r['tags'] or '').split(',') if x)}")
+    if pages > 1:
+        p1, p2, p3 = st.columns([1, 2, 1])
+        if p1.button("← " + t("Previous", "Anterior"), disabled=page_n <= 1, key="ph_prev"):
+            st.session_state["ph_page"] = page_n - 1
+            st.rerun()
+        p2.caption(t(f"Page {page_n} of {pages} · {len(view)} photos", f"Página {page_n} de {pages} · {len(view)} fotos"))
+        if p3.button(t("Next", "Siguiente") + " →", disabled=page_n >= pages, key="ph_next"):
+            st.session_state["ph_page"] = page_n + 1
+            st.rerun()
+
+    if selected:
+        st.markdown("---")
+        st.markdown(t(f"**{len(selected)} selected**", f"**{len(selected)} elegidas**"))
+        b1, b2, b3, b4 = st.columns(4)
+        if b1.button("⭐ " + t("Favorite", "Favorita"), width="stretch"):
+            photos.set_fields(selected, favorite=True)
+            st.rerun()
+        if b2.button("✅ " + t("Mark as used", "Marcar como usadas"), width="stretch"):
+            photos.set_fields(selected, used=True)
+            st.rerun()
+        if b3.button(t("Clear selection", "Limpiar selección"), width="stretch"):
+            for i in selected:
+                st.session_state[f"ph_sel_{i}"] = False
+            st.rerun()
+        with b4.popover("🗑 " + t("Delete", "Borrar"), use_container_width=True):
+            st.write(t(f"Delete {len(selected)} photos for everyone?", f"¿Borrar {len(selected)} fotos para todos?"))
+            if st.button(t("Yes, delete", "Sí, borrar"), type="primary", key="ph_del_yes"):
+                photos.delete_photos(selected)
+                for i in selected:
+                    st.session_state.pop(f"ph_sel_{i}", None)
+                st.rerun()
+        m1, m2 = st.columns([3, 1])
+        dest = m1.selectbox(t("Move to project", "Mover a proyecto"), [NONE] + names, key="ph_move_to",
+                            format_func=lambda v: t("— No project —", "— Sin proyecto —") if v == NONE else v)
+        with m2:
+            st.write("")
+            if st.button(t("📁 Move", "📁 Mover"), width="stretch"):
+                photos.move_to_project(selected, "" if dest == NONE else dest)
+                st.rerun()
+
+        with st.container(border=True):
+            st.markdown(t("**✨ Write a post with these photos**", "**✨ Escribir un posteo con estas fotos**"))
+            c1, c2, c3 = st.columns(3)
+            acc = c1.selectbox(t("Account", "Cuenta"), ACC_KEYS, format_func=acc_label, key="ph_ai_acc")
+            with c2:
+                fmt = sel(t("Format", "Formato"), FORMATS, "Carousel" if len(selected) > 1 else "Photo", key="ph_ai_fmt")
+            with c3:
+                lang = sel(t("Caption language", "Idioma del copy"), LANGUAGES, key="ph_ai_lang")
+            extra = st.text_input(t("Notes for the AI (optional)", "Indicaciones para la IA (opcional)"), key="ph_ai_extra")
+            if st.button(t("✨ Write", "✨ Escribir"), type="primary", key="ph_ai_go"):
+                with st.spinner(t("Looking at the photos…", "Mirando las fotos…")):
+                    try:
+                        rows = df[df["id"].isin(selected)].head(6)
+                        imgs = [(photos.read_bytes(pth), "image/jpeg") for pth in rows["path_thumb"]]
+                        proj_name = next((n for n in rows["project_name"] if n), "")
+                        st.session_state["ph_ai_out"] = ai.caption_from_photos(imgs, proj_name, acc, fmt, lang, extra)
+                        st.session_state["ph_ai_meta"] = dict(account=acc, format=fmt, title=proj_name or t("Photo post", "Posteo con fotos"),
+                                                              ids=selected)
+                    except Exception as e:  # noqa: BLE001
+                        st.error(str(e))
+            if st.session_state.get("ph_ai_out"):
+                out = st.text_area(t("Result (editable)", "Resultado (editable)"), value=st.session_state["ph_ai_out"], height=260,
+                                   key="ph_ai_text")
+                meta = st.session_state["ph_ai_meta"]
+                d1, d2, d3 = st.columns([1, 1, 2])
+                d = d1.date_input(t("Date", "Fecha"), value=dt.date.today() + dt.timedelta(days=1), key="ph_ai_d", format=date_fmt())
+                tm = d2.time_input(t("Time (ET)", "Hora (ET)"), value=dt.time(11, 0), key="ph_ai_t")
+                with d3:
+                    st.write("")
+                    if st.button(t("Save to calendar as Draft", "Guardar en el calendario como Borrador"), type="primary", key="ph_ai_save"):
+                        names_sel = ", ".join(df[df["id"].isin(meta["ids"])]["filename"].tolist())[:900]
+                        db.insert_row(db.posts, dict(publish_date=d.isoformat(), publish_time=tm.strftime("%H:%M"),
+                                                     account=meta["account"], format=meta["format"], pillar="Finished project",
+                                                     title=meta["title"], body=out, status="Draft", owner=user,
+                                                     notes=t("Photos: ", "Fotos: ") + names_sel,
+                                                     created_by=user, updated_at=db.now()))
+                        photos.set_fields(meta["ids"], used=True)
+                        st.success(t("Saved to the calendar and photos marked as used.",
+                                     "Guardado en el calendario y fotos marcadas como usadas."))
 
 
 def page_copy():
@@ -1285,6 +1504,7 @@ PAGES = [
     ("calendar", ("Calendar", "Calendario"), page_calendar),
     ("ideas", ("Ideas", "Ideas"), page_ideas),
     ("projects", ("Projects", "Proyectos"), page_projects),
+    ("photos", ("Photos", "Fotos"), page_photos),
     ("copy", ("AI Captions", "Copys IA"), page_copy),
     ("reports", ("Reports", "Reportes"), page_reports),
     ("accounts", ("Accounts", "Cuentas"), page_accounts),
@@ -1308,9 +1528,10 @@ def main():
         st.markdown(f"<div style='background:#fff;padding:14px;margin-bottom:18px'>{LOGO_SVG.format(w='100%')}</div>",
                     unsafe_allow_html=True)
         current = st.session_state.get("page", "home")
+        nav_key = f"nav_{st.session_state.get('lang', 'en')}"
+        nav_kwargs = {} if nav_key in st.session_state else {"index": list(labels).index(current)}
         page = st.radio("Navigation", list(labels), format_func=lambda k: t(*labels[k]),
-                        index=list(labels).index(current), label_visibility="collapsed",
-                        key=f"nav_{st.session_state.get('lang', 'en')}")
+                        label_visibility="collapsed", key=nav_key, **nav_kwargs)
         st.session_state["page"] = page
         st.markdown("---")
         language_switch()
