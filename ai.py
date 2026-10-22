@@ -56,6 +56,14 @@ def _ask_gemini(prompt, max_tokens):
                           json=body, timeout=120)
         if r.status_code in (400, 401, 403):
             r = requests.post(url, params={"key": str(key).strip()}, json=body, timeout=120)
+        if r.status_code in (400, 401, 403):
+            r = requests.post(url, headers={"Authorization": f"Bearer {str(key).strip()}",
+                                            "Content-Type": "application/json"}, json=body, timeout=120)
+        if r.status_code in (401, 403):
+            raise RuntimeError("Gemini rejected the key (it may have been deleted or mistyped). Create a new key in "
+                               "aistudio.google.com/api-keys and paste it in Secrets → GEMINI_API_KEY. / "
+                               "Gemini rechazó la clave (puede estar borrada o mal copiada). Creá una nueva en "
+                               "aistudio.google.com/api-keys y pegala en Secrets → GEMINI_API_KEY.")
         if r.ok:
             parts = (r.json().get("candidates") or [{}])[0].get("content", {}).get("parts", [])
             text = "".join(p.get("text", "") for p in parts).strip()

@@ -15,7 +15,7 @@ import streamlit as st
 import ai
 import db
 import ig_oauth
-import inspo
+import wall
 import integrations
 from config import (ACCOUNTS, BRAND, DEFAULT_VOICES, FORMATS, IDEA_STATUSES, INSPO,
                     LANGUAGES, LOGO_SVG, PILLARS, STATUSES, get_secret)
@@ -489,7 +489,7 @@ def page_ideas():
            t("Shared team idea bank + AI generator inspired by reference studios.",
              "Banco compartido del equipo + generador con IA inspirado en estudios de referencia."))
     t1, t2, t3 = st.tabs([t("Team bank", "Banco del equipo"), t("✨ Generate with AI", "✨ Generar con IA"),
-                          t("🔄 What's new · live inspo", "🔄 Lo nuevo · inspo en vivo")])
+                          t("📌 Real posts wall", "📌 Muro de posteos reales")])
 
     with t1:
         with st.expander(t("＋ Add an idea", "＋ Sumar una idea"), expanded=False):
@@ -582,7 +582,7 @@ def page_ideas():
                     st.rerun()
 
     with t3:
-        _inspo_feed(user)
+        _wall(user)
         with st.expander(t("Style references the AI uses", "Referencias de estilo que usa la IA")):
             cols = st.columns(3)
             for k, i in enumerate(INSPO):
@@ -592,103 +592,159 @@ def page_ideas():
 
 
 
-@st.cache_data(ttl=3 * 3600, show_spinner=False)
-def _load_inspo():
-    items, errors = inspo.fetch_all()
-    return items, errors, dt.datetime.now().strftime("%H:%M")
+def _embed(src, height):
+    if hasattr(st, "iframe"):
+        st.iframe(src, height=height)
+    else:  # older Streamlit
+        import streamlit.components.v1 as components
+        components.iframe(src, height=height, scrolling=True)
 
 
-def _ago(d):
-    if not d:
-        return ""
-    hours = max(0, int((dt.datetime.now(dt.timezone.utc).replace(tzinfo=None) - d).total_seconds() // 3600))
-    if hours < 24:
-        return t(f"{hours}h ago", f"hace {hours} h")
-    return t(f"{hours // 24}d ago", f"hace {hours // 24} d")
+def _wall(user):
+    st.caption(t("Real Instagram and LinkedIn posts from studios and competitors, shown exactly as they were published. "
+                 "Paste a link → the original post appears here. Soon: Instagram fills in automatically once Meta is connected.",
+                 "Posteos reales de Instagram y LinkedIn de estudios y competidores, tal cual se publicaron. "
+                 "Pegás el link → aparece el post original. Pronto: Instagram se llena solo cuando conectemos Meta."))
+    w1, w2 = st.tabs([t("📌 Wall", "📌 Muro"), t("👀 Accounts to follow", "👀 Cuentas a seguir")])
 
+    with w1:
+        with st.expander(t("➕ Add posts", "➕ Sumar posteos"), expanded=False):
+            with st.form("wall_add", clear_on_submit=True):
+                links = st.text_area(t("Post links (one per line)", "Links de los posteos (uno por línea)"),
+                                     placeholder="https://www.instagram.com/p/…\nhttps://www.linkedin.com/posts/…", height=100)
+                c1, c2 = st.columns(2)
+                author = c1.text_input(t("Account (optional)", "Cuenta (opcional)"), placeholder="@big_builds")
+                note = c2.text_input(t("What's great about it? (the AI uses it)", "¿Qué tiene de bueno? (la IA lo usa)"))
+                if st.form_submit_button(t("Add to the wall", "Sumar al muro"), type="primary"):
+                    ok, bad = 0, []
+                    for line in [l for l in links.splitlines() if l.strip()]:
+                        info = wall.parse_link(line)
+                        if not info:
+                            bad.append(line.strip()[:60])
+                            continue
+                        with db.engine.begin() as c:
+                            c.execute(wall.wall.insert().values(
+                                url=info["url"], platform=info["platform"], embed=info["embed"],
+                                author=(author or info["author"])[:120], note=note, votes=0, voters="",
+                                added_by=user, added_at=db.now()))
+                        ok += 1
+                    if ok:
+                        st.success(t(f"{ok} post(s) added.", f"{ok} posteo(s) sumados."))
+                    if bad:
+                        st.warning(t("These don't look like Instagram/LinkedIn post links: ",
+                                     "Estos no parecen links de posteos de Instagram/LinkedIn: ") + ", ".join(bad))
+            st.caption(t("Instagram: open the post → ··· → Copy link. LinkedIn: open the post → ··· → Copy link to post "
+                         "(or 'Embed this post' and paste the code).",
+                         "Instagram: abrí el post → ··· → Copiar enlace. LinkedIn: abrí el post → ··· → Copiar enlace "
+                         "de la publicación (o 'Insertar esta publicación' y pegá el código)."))
 
-def _inspo_feed(user):
-    st.caption(t("What architecture studios around the world are publishing right now, from ArchDaily and Dezeen. "
-                 "Updates on its own every few hours. Use ✨ to turn any of it into an XB post.",
-                 "Lo que están publicando ahora los estudios de arquitectura del mundo, desde ArchDaily y Dezeen. "
-                 "Se actualiza solo cada pocas horas. Usá ✨ para convertir cualquiera en un posteo de XB."))
-    with st.spinner(t("Loading what's new…", "Cargando lo nuevo…")):
-        items, errors, loaded_at = _load_inspo()
-    c1, c2, c3, c4 = st.columns([2.2, 1.4, 1.2, 0.9])
-    q = c1.text_input(t("Search", "Buscar"), placeholder=t("e.g. timber, coastal, villa, Zaha…",
-                                                           "ej.: madera, costero, villa, Zaha…"), key="if_q")
-    sources = sorted({i["source"] for i in items})
-    src = c2.multiselect(t("Source", "Fuente"), sources, default=sources, key="if_src")
-    days = c3.selectbox(t("From", "Desde"), [3, 7, 14, 30], index=1, key="if_days",
-                        format_func=lambda d: t(f"last {d} days", f"últimos {d} días"))
-    with c4:
-        st.write("")
-        if st.button("↻", help=t("Refresh now", "Actualizar ahora"), key="if_ref", width="stretch"):
-            _load_inspo.clear()
+        posts = db.df(wall.wall)
+        if posts.empty:
+            st.info(t("The wall is empty. Add the first posts with ➕, or find posts from the accounts in 👀.",
+                      "El muro está vacío. Sumá los primeros con ➕, o buscá posteos en las cuentas de 👀."))
+            return
+        c1, c2, c3 = st.columns([1.2, 1.2, 2])
+        plat = c1.selectbox(t("Platform", "Plataforma"), ["all", "instagram", "linkedin"],
+                            format_func=lambda v: {"all": t("All", "Todas"), "instagram": "Instagram", "linkedin": "LinkedIn"}[v])
+        order = c2.selectbox(t("Sort by", "Ordenar por"), ["recent", "votes"],
+                             format_func=lambda v: t("Most recent", "Más recientes") if v == "recent" else t("Most voted", "Más votados"))
+        who = c3.text_input(t("Filter by account", "Filtrar por cuenta"), key="wall_who")
+        if plat != "all":
+            posts = posts[posts["platform"] == plat]
+        if who:
+            posts = posts[posts["author"].fillna("").str.contains(who, case=False)]
+        posts = posts.sort_values("votes" if order == "votes" else "added_at", ascending=False)
+        limit = st.session_state.get("wall_limit", 9)
+        cols = st.columns(3, gap="medium")
+        for k, (_, p) in enumerate(posts.head(limit).iterrows()):
+            with cols[k % 3]:
+                icon = "◎ Instagram" if p["platform"] == "instagram" else "in LinkedIn"
+                st.markdown(f"<div class='xb-muted'><span class='xb-chip'>{icon}</span> "
+                            f"<b>{html.escape(p['author'] or '')}</b> · {t('added by', 'sumado por')} {html.escape(p['added_by'] or '')}</div>",
+                            unsafe_allow_html=True)
+                _embed(p["embed"], 640 if p["platform"] == "instagram" else 560)
+                voters = [v for v in (p["voters"] or "").split(",") if v]
+                voted = user in voters
+                b1, b2, b3, b4 = st.columns([1, 1.3, 0.8, 0.8])
+                if b1.button(f"{'★' if voted else '☆'} {int(p['votes'] or 0)}", key=f"wv_{p['id']}", width="stretch"):
+                    voters = [v for v in voters if v != user] if voted else voters + [user]
+                    with db.engine.begin() as c:
+                        c.execute(wall.wall.update().where(wall.wall.c.id == int(p["id"]))
+                                  .values(voters=",".join(voters), votes=len(voters)))
+                    st.rerun()
+                akey = f"wa_{p['id']}"
+                if b2.button(t("✨ Adapt", "✨ Adaptar"), key=akey, width="stretch",
+                             help=t("Turn it into an XB post idea", "Convertirlo en una idea de posteo para XB")):
+                    with st.spinner(t("Thinking…", "Pensando…")):
+                        try:
+                            st.session_state[akey + "_r"] = ai.adapt_inspo(
+                                f"{p['platform'].title()} post by {p['author'] or 'a reference studio'}",
+                                p["note"] or "(no notes — infer a strong, typical approach for this kind of studio post)",
+                                p["platform"], p["author"], ACC_KEYS, "Spanish" if is_es() else "English")
+                        except Exception as e:  # noqa: BLE001
+                            st.error(str(e))
+                b3.link_button("↗", p["url"], width="stretch")
+                if b4.button("🗑", key=f"wd_{p['id']}", width="stretch"):
+                    with db.engine.begin() as c:
+                        c.execute(wall.wall.delete().where(wall.wall.c.id == int(p["id"])))
+                    st.rerun()
+                res = st.session_state.get(akey + "_r")
+                if res:
+                    with st.container(border=True):
+                        st.markdown(f"**✨ {res.get('title', '')}**")
+                        st.caption(f"{t('Borrow', 'Tomar')}: {res.get('why', '')}")
+                        st.write(res.get("description", ""))
+                        st.text_area(t("Caption draft", "Borrador de copy"), value=res.get("caption", ""), key=akey + "_c", height=140)
+                        if st.button(t("💡 Save as XB idea", "💡 Guardar como idea de XB"), key=akey + "_i"):
+                            db.insert_row(db.ideas, dict(
+                                title=res.get("title", "")[:240], description=res.get("description", ""),
+                                pillar=res.get("pillar") if res.get("pillar") in PILLARS else "Trends & Inspiration",
+                                format=res.get("format") if res.get("format") in FORMATS else "Carousel",
+                                account=res.get("account") if res.get("account") in ACC_KEYS else "ig_xb",
+                                inspo=p["url"][:240], source="AI", votes=0, voters="", status="New",
+                                created_by=user, created_at=db.now()))
+                            st.toast(t("Saved to the idea bank", "Guardada en el banco de ideas"))
+        if len(posts) > limit and st.button(t("Show more", "Ver más"), key="wall_more"):
+            st.session_state["wall_limit"] = limit + 9
             st.rerun()
-    cutoff = dt.datetime.now(dt.timezone.utc).replace(tzinfo=None) - dt.timedelta(days=days)
-    shown = [i for i in items if i["source"] in src and (i["published"] is None or i["published"] >= cutoff)]
-    if q:
-        ql = q.lower()
-        shown = [i for i in shown if ql in (i["title"] + " " + i["summary"] + " " + i["studio"]).lower()]
-    st.caption(t(f"{len(shown)} posts · updated {loaded_at}", f"{len(shown)} publicaciones · actualizado {loaded_at}"))
-    if errors and not items:
-        st.warning(t("Couldn't load the feeds right now. Try ↻ in a few minutes.",
-                     "No se pudieron cargar las fuentes ahora. Probá ↻ en unos minutos."))
-    if not shown and items:
-        st.info(t("Nothing matches. Try another search or a longer period.",
-                  "No hay resultados. Probá otra búsqueda o un período más largo."))
-    limit = st.session_state.get("if_limit", 24)
-    cols = st.columns(3, gap="medium")
-    for k, i in enumerate(shown[:limit]):
-        with cols[k % 3]:
-            who = html.escape(i["studio"] or i["source"])
-            initials = "".join(w[0] for w in (i["studio"] or i["source"]).split()[:2]).upper() or "XB"
-            visual = (f"<img class='img' src='{html.escape(i['image'])}' loading='lazy' referrerpolicy='no-referrer'>"
-                      if i.get("image") else f"<div class='noimg'>{html.escape(i['title'])}</div>")
-            st.markdown(
-                f"<div class='xb-post'><div class='hd'><div class='av'>{html.escape(initials)}</div>"
-                f"<div><div class='who'>{who}</div><div class='meta'>{html.escape(i['source'])} · {_ago(i['published'])}</div></div></div>"
-                f"{visual}<div class='bd'><b>{html.escape(i['title'])}</b>"
-                f"<div class='cap'>{html.escape(i['summary'])}</div></div></div>",
-                unsafe_allow_html=True)
-            b1, b2, b3 = st.columns([1, 1.25, 1])
-            b1.link_button("↗", i["link"], help=t("Open the full post", "Abrir la publicación completa"), width="stretch")
-            key = f"ad_{abs(hash(i['link']))}"
-            if b2.button(t("✨ Adapt", "✨ Adaptar"), key=key, width="stretch", help=t("Turn it into an XB post", "Convertirlo en un posteo de XB")):
-                with st.spinner(t("Thinking…", "Pensando…")):
-                    try:
-                        st.session_state[key + "_r"] = ai.adapt_inspo(
-                            i["title"], i["summary"], i["source"], i["studio"], ACC_KEYS,
-                            "Spanish" if is_es() else "English")
-                    except Exception as e:  # noqa: BLE001
-                        st.error(str(e))
-            if b3.button("💾", key=key + "_s", width="stretch", help=t("Save to the idea bank", "Guardar en el banco de ideas")):
-                db.insert_row(db.ideas, dict(title=i["title"][:240], description=i["summary"], pillar="Trends & Inspiration",
-                                             format="Carousel", account="ig_xb", inspo=i["link"][:240], source="Team",
-                                             votes=0, voters="", status="New", created_by=user, created_at=db.now()))
-                st.toast(t("Saved to the idea bank", "Guardada en el banco de ideas"))
-            res = st.session_state.get(key + "_r")
-            if res:
+
+    with w2:
+        st.caption(t("Studios and competitors worth watching. Open their profiles to find posts for the wall. "
+                     "Use 🔎 once to find the exact account and paste it in the table.",
+                     "Estudios y competidores para seguir de cerca. Abrí sus perfiles para encontrar posteos para el muro. "
+                     "Usá 🔎 una vez para encontrar la cuenta exacta y pegala en la tabla."))
+        accs = wall.accounts()
+        cols = st.columns(3, gap="medium")
+        for k, a in enumerate(accs):
+            with cols[k % 3]:
                 with st.container(border=True):
-                    st.markdown(f"**✨ {res.get('title', '')}**")
-                    st.caption(f"{t('Borrow', 'Tomar')}: {res.get('why', '')}")
-                    st.write(res.get("description", ""))
-                    st.text_area(t("Caption draft", "Borrador de copy"), value=res.get("caption", ""),
-                                 key=key + "_c", height=150)
-                    if st.button(t("💡 Save as XB idea", "💡 Guardar como idea de XB"), key=key + "_i"):
-                        db.insert_row(db.ideas, dict(
-                            title=res.get("title", "")[:240], description=res.get("description", ""),
-                            pillar=res.get("pillar") if res.get("pillar") in PILLARS else "Trends & Inspiration",
-                            format=res.get("format") if res.get("format") in FORMATS else "Carousel",
-                            account=res.get("account") if res.get("account") in ACC_KEYS else "ig_xb",
-                            inspo=i["link"][:240], source="AI", votes=0, voters="", status="New",
-                            created_by=user, created_at=db.now()))
-                        st.toast(t("Saved to the idea bank", "Guardada en el banco de ideas"))
-    if len(shown) > limit:
-        if st.button(t("Show more", "Ver más"), key="if_more"):
-            st.session_state["if_limit"] = limit + 24
-            st.rerun()
+                    st.markdown(f"**{a.get('name', '')}**  \n<span class='xb-muted'>{a.get('country', '')} · {a.get('why', '')}</span>",
+                                unsafe_allow_html=True)
+                    c1, c2 = st.columns(2)
+                    if a.get("ig"):
+                        c1.link_button(f"◎ @{a['ig'].lstrip('@')}", wall.ig_url(a["ig"]), width="stretch")
+                    else:
+                        c1.link_button("◎ 🔎", wall.search_url(a.get("name", ""), "ig"), width="stretch",
+                                       help=t("Find their Instagram", "Buscar su Instagram"))
+                    if a.get("li"):
+                        c2.link_button("in LinkedIn", wall.li_url(a["li"]), width="stretch")
+                    else:
+                        c2.link_button("in 🔎", wall.search_url(a.get("name", ""), "li"), width="stretch",
+                                       help=t("Find their LinkedIn", "Buscar su LinkedIn"))
+        with st.expander(t("✏️ Edit the list (add accounts, paste exact handles)",
+                           "✏️ Editar la lista (sumar cuentas, pegar usuarios exactos)")):
+            edited = st.data_editor(pd.DataFrame(accs, columns=["name", "country", "why", "ig", "li"]),
+                                    num_rows="dynamic", width="stretch", key="wall_acc_editor",
+                                    column_config={"name": t("Studio", "Estudio"), "country": t("Where", "Dónde"),
+                                                   "why": t("Why follow", "Por qué seguirlo"),
+                                                   "ig": t("Instagram user", "Usuario de Instagram"),
+                                                   "li": t("LinkedIn URL or name", "URL o nombre de LinkedIn")})
+            if st.button(t("Save list", "Guardar lista"), type="primary", key="wall_acc_save"):
+                rows = [{k2: ("" if pd.isna(v) else str(v)) for k2, v in r.items()}
+                        for r in edited.to_dict("records") if str(r.get("name") or "").strip()]
+                wall.save_accounts(rows)
+                st.success(t("Saved", "Guardado"))
+                st.rerun()
 
 
 def _save_ai_idea(g, user):
